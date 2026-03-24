@@ -1,0 +1,74 @@
+"""
+Voicer Desktop Host — FastAPI server that receives commands from the phone PWA.
+
+Endpoints:
+  POST /tap    — Move mouse to (x, y) normalized coords and click
+  POST /type   — Type a text string
+  POST /scroll — Scroll up or down
+  POST /command — Execute a system command (keyboard shortcut, focus window, etc.)
+
+Run: uvicorn server:app --host 0.0.0.0 --port 8000
+"""
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from input import tap, type_text, scroll, execute_command
+
+app = FastAPI(title="Voicer Host", version="0.1.0")
+
+# Allow CORS from PWA during development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # TODO: Restrict to PWA origin in production
+    allow_methods=["POST"],
+    allow_headers=["*"],
+)
+
+
+class TapRequest(BaseModel):
+    x: float = Field(ge=0.0, le=1.0, description="Normalized X coordinate (0.0 = left, 1.0 = right)")
+    y: float = Field(ge=0.0, le=1.0, description="Normalized Y coordinate (0.0 = top, 1.0 = bottom)")
+
+
+class TypeRequest(BaseModel):
+    text: str
+
+
+class ScrollRequest(BaseModel):
+    delta: int = Field(description="Positive = scroll up, negative = scroll down")
+
+
+class CommandRequest(BaseModel):
+    action: str = Field(description="Command name: 'focus', 'shortcut', 'open_url', etc.")
+    payload: dict = Field(default_factory=dict)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "voicer-host"}
+
+
+@app.post("/tap")
+async def handle_tap(req: TapRequest):
+    tap(req.x, req.y)
+    return {"ok": True}
+
+
+@app.post("/type")
+async def handle_type(req: TypeRequest):
+    type_text(req.text)
+    return {"ok": True}
+
+
+@app.post("/scroll")
+async def handle_scroll(req: ScrollRequest):
+    scroll(req.delta)
+    return {"ok": True}
+
+
+@app.post("/command")
+async def handle_command(req: CommandRequest):
+    result = execute_command(req.action, req.payload)
+    return {"ok": True, "result": result}

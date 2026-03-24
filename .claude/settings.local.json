@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(printf 'n\\\\nn\\\\n')",
+      "Bash(yes n)",
+      "Bash(npm install @supabase/supabase-js @supabase/ssr zustand zod)",
+      "Bash(npm run build)"
+    ]
+  }
+}
