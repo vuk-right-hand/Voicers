@@ -18,3 +18,6 @@ export const SNIPER_ZOOM_LEVEL = 1.5;
 
 /** OLED blackout color for pocket mode */
 export const POCKET_MODE_BG = "#000000";
+
+/** Dev-only user ID — shared between host and PWA. Replace with real auth in Phase 2. */
+export const DEV_USER_ID = "00000000-0000-0000-0000-000000000001";

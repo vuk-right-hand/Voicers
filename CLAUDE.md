@@ -8,7 +8,9 @@ Phone (PWA)  ←— WebRTC (video + data channel) —→  Desktop Host (Python/F
 Supabase (Auth, Signaling)                         Local .env (BYOK keys)
 ```
 
-Monorepo: `src/` = Next.js 15 PWA, `host/` = Python desktop receiver.
+Monorepo: `src/` = Next.js 16 PWA, `host/` = Python desktop receiver.
+
+**Next.js 16:** `middleware.ts` is deprecated — use `src/proxy.ts` with `export function proxy()` instead.
 
 ---
 
@@ -63,13 +65,26 @@ Never write application logic before the database reality is strictly defined.
 - OLED black (`#000000`) + WakeLock API + mic stays hot
 - Double-tap black screen to restore
 
-## 7. WebRTC Signaling
+## 7. WebRTC Rules (Non-Negotiable)
 
-Supabase Realtime on `sessions` table:
-1. Host creates session: `pc_status = 'waiting'`
-2. Phone subscribes via Realtime
-3. SDP/ICE exchanged via `signaling_data` JSONB
-4. Connected → all data flows over WebRTC, Supabase exits
+**Phone is ALWAYS the caller.** Host never generates SDP offers — it waits with `host-ready`. Phone creates a fresh offer on "Connect" tap. Stale offers = dead connections.
+
+**Handshake via Supabase Realtime** on `sessions` table:
+1. Host boots → upserts session: `pc_status = 'waiting'`, `signaling_data = { type: "host-ready" }`
+2. Phone taps Connect → creates data channel FIRST, then SDP offer → writes to Supabase
+3. Host receives offer → creates answer → writes to Supabase
+4. ICE candidates exchanged via `signaling_data`. **Both sides MUST queue ICE candidates if remote description isn't set yet.**
+5. Connected → all data flows over WebRTC (UDP), Supabase exits
+
+**Phone creates the data channel BEFORE the SDP offer.** If created after, SDP won't include data transport rules. Host receives it via `ondatachannel`.
+
+**Video: `<video autoPlay playsInline muted>`** — `muted` is mandatory or iOS Safari blocks auto-play (black screen).
+
+**Never stream video over WebSocket/TCP.** TCP head-of-line blocking causes freezes on unstable networks. Always use WebRTC (UDP).
+
+**Never use Object URLs for video frames.** Creating/destroying blob URLs at 15-30 FPS causes React re-render storms and memory leaks. Use native `MediaStream` → `video.srcObject`.
+
+**Always downscale screen capture before encoding.** Max 1280x720 for phone viewing. Native 4K/1440p will max out CPU and lag the code editor.
 
 ## 8. Voice
 

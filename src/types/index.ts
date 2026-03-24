@@ -21,6 +21,28 @@ export interface Session {
   created_at: string;
 }
 
+// --- WebRTC Signaling ---
+
+export type SignalingData =
+  | { type: "host-ready"; host_id: string }
+  | { type: "offer"; sdp: string; from: "phone" }
+  | { type: "answer"; sdp: string; from: "host" }
+  | { type: "ice-candidate"; candidate: string; from: "host" | "phone" };
+
+// Phone → Host (via data channel)
+export type PhoneCommand =
+  | { type: "tap"; x: number; y: number }
+  | { type: "scroll"; delta: number }
+  | { type: "type"; text: string }
+  | { type: "command"; action: string; payload: Record<string, unknown> };
+
+// Host → Phone (via data channel)
+export type HostMessage =
+  | { type: "screen-info"; width: number; height: number }
+  | { type: "error"; message: string };
+
+export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "failed";
+
 export interface Subscription {
   id: string;
   user_id: string;

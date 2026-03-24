@@ -10,13 +10,28 @@ Endpoints:
 Run: uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from input import tap, type_text, scroll, execute_command
+from webrtc_host import start_host, stop_host
 
-app = FastAPI(title="Voicer Host", version="0.1.0")
+logging.basicConfig(level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start WebRTC host on boot, clean up on shutdown."""
+    await start_host()
+    yield
+    await stop_host()
+
+
+app = FastAPI(title="Voicer Host", version="0.2.0", lifespan=lifespan)
 
 # Allow CORS from PWA during development
 app.add_middleware(

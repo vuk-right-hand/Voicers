@@ -5,17 +5,18 @@ Uses pyautogui for cross-platform desktop control.
 
 import pyautogui
 
-# Safety: disable pyautogui's fail-safe (move mouse to corner to abort)
-# Keep enabled during development
-pyautogui.FAILSAFE = True
+# Disable fail-safe — tapping the extreme edge of the phone screen sends (0,0)
+# which triggers FailSafeException and crashes the host.
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.02  # Small delay between actions for reliability
 
 
 def tap(x: float, y: float) -> None:
     """Click at normalized coordinates (0.0-1.0 mapped to screen resolution)."""
     screen_w, screen_h = pyautogui.size()
-    abs_x = int(x * screen_w)
-    abs_y = int(y * screen_h)
+    # Clamp to [1, size-1] to avoid landing exactly on (0,0) or overshooting
+    abs_x = max(1, min(int(x * screen_w), screen_w - 1))
+    abs_y = max(1, min(int(y * screen_h), screen_h - 1))
     pyautogui.click(abs_x, abs_y)
 
 
