@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import type { PcStatus, TransportStatus, PhoneCommand } from "@/types";
 import { initiateCall } from "@/lib/webrtc/peer";
+import { useVoiceStore, playTTSAudio } from "@/hooks/use-voice";
 
 interface SessionState {
   /** Host status from Supabase */
@@ -54,11 +55,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       (dc) => {
         set({ dataChannel: dc });
 
+        dc.binaryType = "arraybuffer";
         dc.onmessage = (event) => {
+          // Binary message = TTS audio (raw MP3 bytes from host)
+          if (event.data instanceof ArrayBuffer) {
+            playTTSAudio(event.data);
+            return;
+          }
+
           try {
             const msg = JSON.parse(event.data);
+
             if (msg.type === "screen-info") {
               set({ screenWidth: msg.width, screenHeight: msg.height });
+            } else if (msg.type === "stt") {
+              const voiceStore = useVoiceStore.getState();
+              if (msg.is_final) {
+                voiceStore.appendTranscript(msg.text);
+                voiceStore.setInterimText("");
+              } else {
+                voiceStore.setInterimText(msg.text);
+              }
+            } else if (msg.type === "voice-status") {
+              useVoiceStore.getState().setStatus(msg.status);
             }
           } catch {
             // ignore malformed messages
@@ -102,7 +121,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => ({ isPocketMode: !state.isPocketMode })),
 
   sendCommand: (cmd) => {
-    const { dataChannel } = get();
+    const { dataChannel, isPocketMode } = get();
+    if (isPocketMode) return;
     if (dataChannel?.readyState === "open") {
       dataChannel.send(JSON.stringify(cmd));
     }

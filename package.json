@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 0.0.0.0 --experimental-https",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "host": "cd host && venv/Scripts/uvicorn server:app --host 0.0.0.0 --port 8000 --reload"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",

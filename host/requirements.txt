@@ -8,3 +8,6 @@ httpx>=0.28.0
 websockets>=15.0
 Pillow>=11.0.0
 numpy>=2.0.0
+deepgram-sdk>=3.0.0
+openai>=1.0.0
+pyperclip>=1.8.0

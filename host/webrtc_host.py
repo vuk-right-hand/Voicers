@@ -18,7 +18,10 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaStreamTrack
 import av
 
-from input import tap, type_text, scroll, execute_command
+from input import tap, type_text, type_text_paste, scroll, execute_command
+from stt import DeepgramSTT
+from tts import TextToSpeech
+from ai import JarvisAI
 from screen import get_screen_size
 from supabase_client import (
     upsert_session,
@@ -94,6 +97,14 @@ class WebRTCHost:
         self._remote_description_set = False
         self._channel = None  # Supabase Realtime channel
         self._running = False
+
+        # Voice engine
+        self._stt: DeepgramSTT | None = None
+        self._tts = TextToSpeech()
+        self._jarvis = JarvisAI()
+        self._voice_active = False
+        self._voice_mode: str | None = None  # "dictation" | "command"
+        self._command_transcript: list[str] = []  # accumulates final STT chunks in command mode
 
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
@@ -231,8 +242,15 @@ class WebRTCHost:
 
         @channel.on("message")
         def on_message(message):
+            # Binary message = raw PCM audio from phone mic
+            if isinstance(message, bytes):
+                if self._voice_active and self._stt:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._stt.send_audio(message))
+                return
+
             try:
-                data = json.loads(message) if isinstance(message, str) else message
+                data = json.loads(message)
             except json.JSONDecodeError:
                 logger.warning("Invalid JSON on data channel: %s", message)
                 return
@@ -248,10 +266,23 @@ class WebRTCHost:
             elif cmd_type == "type":
                 type_text(data["text"])
 
+            elif cmd_type == "type-text":
+                # Dictation accept → paste via clipboard (instant)
+                type_text_paste(data["text"])
+
             elif cmd_type == "command":
                 result = execute_command(data["action"], data.get("payload", {}))
-                if result:
+                if result and result != "unknown_action":
                     channel.send(json.dumps({"type": "error", "message": result}))
+
+            elif cmd_type == "voice-start":
+                self._voice_mode = data.get("mode", "dictation")
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._start_voice(channel))
+
+            elif cmd_type == "voice-stop":
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._stop_voice(channel))
 
             else:
                 logger.warning("Unknown command type: %s", cmd_type)
@@ -270,6 +301,103 @@ class WebRTCHost:
         @channel.on("close")
         def on_close():
             logger.info("Data channel closed")
+            # Clean up any active voice session (no Jarvis on disconnect)
+            if self._voice_active:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._stop_voice(channel=None))
+
+    async def _start_voice(self, channel):
+        """Start a Deepgram STT session."""
+        self._voice_active = True
+        self._command_transcript = []
+
+        def on_transcript(text: str, is_final: bool):
+            """Send transcription to phone and accumulate finals for command mode."""
+            if channel.readyState == "open":
+                channel.send(json.dumps({
+                    "type": "stt",
+                    "text": text,
+                    "is_final": is_final,
+                }))
+            # Accumulate final chunks so host can act on the full spoken command
+            if is_final and text:
+                self._command_transcript.append(text)
+
+        self._stt = DeepgramSTT(on_transcript=on_transcript)
+        await self._stt.start()
+
+        # Tell phone we're listening
+        if channel.readyState == "open":
+            channel.send(json.dumps({
+                "type": "voice-status",
+                "status": "listening",
+            }))
+
+        logger.info("Voice session started (mode=%s)", self._voice_mode)
+
+    async def _stop_voice(self, channel=None):
+        """Stop the active Deepgram STT session."""
+        mode = self._voice_mode  # capture before clearing
+
+        if self._stt:
+            await self._stt.stop()
+            self._stt = None
+
+        self._voice_active = False
+        self._voice_mode = None
+
+        # If a voice command was spoken, trigger Jarvis with the full transcript
+        if mode == "command" and self._command_transcript and channel:
+            spoken = " ".join(self._command_transcript).strip()
+            self._command_transcript = []
+            if spoken:
+                logger.info("Voice command spoken: %s", spoken)
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._jarvis_feedback(channel, spoken))
+        else:
+            self._command_transcript = []
+
+        logger.info("Voice session stopped")
+
+    async def _jarvis_feedback(self, channel, action: str):
+        """Generate Jarvis AI response + TTS after a command, then send to phone."""
+        try:
+            # Small delay to let the command take effect on screen
+            await asyncio.sleep(0.5)
+
+            # Tell phone we're processing
+            if channel.readyState == "open":
+                channel.send(json.dumps({
+                    "type": "voice-status",
+                    "status": "processing",
+                }))
+
+            # Get Jarvis response (includes screenshot) — run in thread to avoid blocking event loop
+            jarvis_text = await asyncio.to_thread(self._jarvis.get_response, action)
+            if not jarvis_text:
+                return
+
+            # Generate TTS audio — also blocking, run in thread
+            mp3_bytes = await asyncio.to_thread(self._tts.speak, jarvis_text)
+            if not mp3_bytes:
+                return
+
+            # Send raw MP3 binary directly over data channel
+            if channel.readyState == "open":
+                channel.send(json.dumps({
+                    "type": "voice-status",
+                    "status": "speaking",
+                }))
+                channel.send(mp3_bytes)
+
+        except Exception:
+            logger.exception("Jarvis feedback failed")
+        finally:
+            if channel.readyState == "open":
+                channel.send(json.dumps({
+                    "type": "voice-status",
+                    "status": "idle",
+                }))
 
     async def stop(self):
         """Clean shutdown."""

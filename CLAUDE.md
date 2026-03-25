@@ -1,102 +1,62 @@
-# Voicer
+# Voicers System Context
+**Project:** Voice-first headless coding PWA & Desktop Host.
+**Topology:** Phone PWA ← [WebRTC UDP] → Python Host. (Supabase for initial signaling only).
+**Frameworks:** Next.js 16 (PWA), Python/FastAPI + aiortc (Host), Supabase.
 
-Voice-first PWA that turns your phone into a remote controller for vibe coding on your PC/Mac/laptop. Mirrors desktop via WebRTC, controls via voice + gestures + minimal touch.
+## 1. WebRTC Protocol (Strict)
+* **Phone is Caller:** Host waits with `pc_status = 'waiting'`. Phone generates fresh SDP offer on connect.
+* **Data Channel First:** Phone MUST execute `pc.createDataChannel()` BEFORE creating the SDP offer. Host receives via `pc.on("datachannel")`.
+* **ICE Queue:** Both clients MUST queue incoming ICE candidates until the Remote Description is fully set.
+* **Video Transport:** Native `MediaStream` direct to `<video autoPlay playsInline muted>`. 
+* **Banned:** NEVER stream video over WebSockets. NEVER use Object URLs for frames. 
+* **Host Processing:** Python MUST downscale screen capture to max 1280x720 before WebRTC encoding.
 
-```
-Phone (PWA)  ←— WebRTC (video + data channel) —→  Desktop Host (Python/FastAPI)
-     ↕                                                    ↕
-Supabase (Auth, Signaling)                         Local .env (BYOK keys)
-```
+## 2. Gesture Engine (Sticky Scope)
+We own 100% of gestures. Use native `TouchEvent` API (`onTouchStart/Move/End`), NOT `PointerEvents`.
+* **DOM Structure:** Outer wrapper gets `<div className="overflow-hidden w-full h-full touch-none">`. Inner element is `<video style={zoomStyle}>`.
+* **Coordinate Math:** `sendTap()` MUST calculate `(clientX - rect.left) / rect.width` using `videoRef.current.getBoundingClientRect()` at `touchend`. Never use `window.innerWidth`.
+* **State Machine Logic:**
+  * **Hold 200ms:** 200% Zoom (Sticky - stays zoomed when finger lifts). Slop radius = 10px to cancel.
+  * **Zoomed + 1-Finger Drag:** Pan viewport.
+  * **Zoomed + Quick Tap:** Precision click at zoomed coords + Exit zoom.
+  * **Zoomed + 2-Finger Tap:** Cancel zoom (NO click).
+  * **Idle + 2-Finger Drag:** Scroll (`sendScroll`).
 
-Monorepo: `src/` = Next.js 16 PWA, `host/` = Python desktop receiver.
+## 3. Voice Engine & Hardware Control
+* **Deepgram STT:** Always pass `keywords=["Next.js:10", "FastAPI:10", "pyautogui:10"]` (and other tech slang) to bias the transcription.
+* **Two-Lane Shortcut Engine:** Voice parsing executes on the Python Host via local `shortcuts.json`.
+  * **Lane 1 (Dictation):** String replacement (e.g., "repo" -> "repository").
+  * **Lane 2 (Commands):** Direct OS macros (e.g., "go" -> `pyautogui.press('enter')`).
+* **Hardware Config:** `host/input.py` MUST set `pyautogui.PAUSE = 0` and `pyautogui.FAILSAFE = False` to allow zero-latency physical double-taps.
 
-**Next.js 16:** `middleware.ts` is deprecated — use `src/proxy.ts` with `export function proxy()` instead.
+## 4. Architecture & Security Boundaries
+* **BYOK Security:** API keys (OpenAI, Deepgram) NEVER touch Supabase. Store in `host/.env` or PWA `localStorage`.
+* **No Secrets in Client Code:** Only `NEXT_PUBLIC_` for truly public values (Supabase URL, anon key). Never expose API keys in the client bundle.
+* **Data-First Rule:** Define exact Supabase schemas and JSON payloads. Get explicit user confirmation before writing logic.
+* **RLS:** Enforce on all tables. Assume PWA is entirely insecure.
+* **Tailwind Only:** No CSS modules, no styled-components, no inline style objects (except dynamic values like zoom transforms).
+* **Next.js 16:** Use Server Components by default. Use `src/proxy.ts` with `export function proxy()` instead of `middleware.ts`.
 
----
+## 5. The Repair Loop
+When an error occurs:
+1. **Analyze:** Read the stack trace. Check WebRTC SDP formats and ICE states first for connection failures.
+2. **Patch:** Fix the specific broken logic. Do NOT rewrite entire files or refactor surrounding code unless requested.
+3. **Document:** Log root cause and fix in `.claude_learnings.md`. Read this file before beginning any debugging.
 
-## 1. The Self-Annealing Repair Loop
+## 6. UX Modes
+* **Comms Button** — Single button, two modes:
+  * **Double-tap:** Dictate prompt (STT → text into active editor).
+  * **Hold:** Execute system command ("Run", "Send", "Open Terminal").
+* **Pocket Mode:** OLED black (`#000000`) + WakeLock API + mic stays hot. Double-tap black screen to restore.
 
-When a script fails or an error occurs:
-1. **Analyze:** Read the stack trace and error message.
-2. **Patch:** Fix the specific code. Do not rewrite entire files unless requested.
-3. **Document:** Log the root cause and fix in `.claude_learnings.md` so you do not repeat the mistake. Always read this file before debugging.
-
-## 2. The Data-First Rule
-
-Never write application logic before the database reality is strictly defined.
-- When building a feature, first define the exact Supabase schema (tables, data types, RLS policies) and the JSON payload shapes.
-- Ask for explicit confirmation on the data shape. Coding only begins once approved.
-
-## 3. Coding Standards
-
-- **Server Components by default.** Add `"use client"` only when needed.
-- **Tailwind only** — no CSS modules, no styled-components.
-- **RLS on every table.** Users can only access their own data. Assume the frontend is entirely insecure.
-- **No secrets in client code.** `NEXT_PUBLIC_` prefix only for truly public values.
-- **Query efficiency** — always account for indexing and pagination when fetching from Supabase.
-- **Mobile-first.** Test on phone-sized viewport.
-- **Patch, don't rewrite.** Fix the specific broken thing. Don't refactor surrounding code unless asked.
-
-## 4. Testing Rules
-
-- Write tests for: data transformations, webhook handlers, Supabase Edge Functions, WebRTC signaling logic.
-- Do NOT write tests for: basic UI components, simple routing, static pages.
-- Focus testing on data integrity and security.
-
-## 5. BYOK Security (Non-Negotiable)
-
-**API keys NEVER touch our cloud database.** No `api_keys` table exists.
-- PC: stored in `host/.env`
-- Phone: PWA `localStorage` → sent to PC via WebRTC data channel only
-
-## 6. UX Rules (Read Before Writing UI Code)
-
-**Comms Button** — Single button, two modes:
-- Double-tap = dictate prompt (STT → text)
-- Hold = execute system command ("Run", "Send", "Open Terminal")
-
-**Touch on Stream:**
-- Quick tap = mouse click
-- 0.2s hold = 150% sniper zoom for precision
-- 3-finger tap = floating keyboard (vertical, draggable)
-- `touch-action: none` on stream — we own ALL gestures
-
-**Pocket Mode:**
-- OLED black (`#000000`) + WakeLock API + mic stays hot
-- Double-tap black screen to restore
-
-## 7. WebRTC Rules (Non-Negotiable)
-
-**Phone is ALWAYS the caller.** Host never generates SDP offers — it waits with `host-ready`. Phone creates a fresh offer on "Connect" tap. Stale offers = dead connections.
-
-**Handshake via Supabase Realtime** on `sessions` table:
-1. Host boots → upserts session: `pc_status = 'waiting'`, `signaling_data = { type: "host-ready" }`
-2. Phone taps Connect → creates data channel FIRST, then SDP offer → writes to Supabase
-3. Host receives offer → creates answer → writes to Supabase
-4. ICE candidates exchanged via `signaling_data`. **Both sides MUST queue ICE candidates if remote description isn't set yet.**
-5. Connected → all data flows over WebRTC (UDP), Supabase exits
-
-**Phone creates the data channel BEFORE the SDP offer.** If created after, SDP won't include data transport rules. Host receives it via `ondatachannel`.
-
-**Video: `<video autoPlay playsInline muted>`** — `muted` is mandatory or iOS Safari blocks auto-play (black screen).
-
-**Never stream video over WebSocket/TCP.** TCP head-of-line blocking causes freezes on unstable networks. Always use WebRTC (UDP).
-
-**Never use Object URLs for video frames.** Creating/destroying blob URLs at 15-30 FPS causes React re-render storms and memory leaks. Use native `MediaStream` → `video.srcObject`.
-
-**Always downscale screen capture before encoding.** Max 1280x720 for phone viewing. Native 4K/1440p will max out CPU and lag the code editor.
-
-## 8. Voice
-
-- **STT:** Deepgram (streaming). **TTS:** Kokoro (local) or OpenAI.
-- Jarvis feedback: host summarizes AI output in 1-2 sentences via TTS — never reads raw code.
-
----
+## 7. Testing Rules
+* **Test:** Data transformations, webhook handlers, Supabase Edge Functions, WebRTC signaling logic.
+* **Skip:** Basic UI components, simple routing, static pages.
+* Focus on data integrity and security boundaries.
 
 ## Commands
-
 ```bash
 npm run dev                    # Next.js dev server
 npm run build                  # Production build
-cd host && uvicorn server:app --host 0.0.0.0 --port 8000 --reload  # Desktop host
-```
+cd host && python -m venv venv # Virtual env setup
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload  # Desktop host

@@ -34,12 +34,19 @@ export type PhoneCommand =
   | { type: "tap"; x: number; y: number }
   | { type: "scroll"; delta: number }
   | { type: "type"; text: string }
-  | { type: "command"; action: string; payload: Record<string, unknown> };
+  | { type: "command"; action: string; payload: Record<string, unknown> }
+  | { type: "voice-start"; mode: "dictation" | "command" }
+  | { type: "voice-stop" }
+  | { type: "type-text"; text: string };
+// Note: binary ArrayBuffer (raw PCM audio) is also sent but not typed here
 
 // Host → Phone (via data channel)
 export type HostMessage =
   | { type: "screen-info"; width: number; height: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "stt"; text: string; is_final: boolean }
+  | { type: "voice-status"; status: "listening" | "processing" | "speaking" | "idle" };
+// Note: binary ArrayBuffer (raw MP3 TTS) is also sent but not typed here
 
 export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "failed";
 

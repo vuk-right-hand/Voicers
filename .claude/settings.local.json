@@ -4,7 +4,15 @@
       "Bash(printf 'n\\\\nn\\\\n')",
       "Bash(yes n)",
       "Bash(npm install @supabase/supabase-js @supabase/ssr zustand zod)",
-      "Bash(npm run build)"
+      "Bash(npm run build)",
+      "Bash(ls -la /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/)",
+      "Bash(venv/Scripts/python --version)",
+      "Bash(xargs grep -l \"PhoneCommand\\\\|SignalingData\")",
+      "Bash(ls -la /c/Antigravity/Voicer/host/*.py)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(pip install deepgram-sdk openai pyperclip)",
+      "Bash(venv/Scripts/pip install openai deepgram-sdk pyperclip)",
+      "Bash(venv/Scripts/pip show openai deepgram-sdk pyperclip)"
     ]
   }
 }

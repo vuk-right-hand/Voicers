@@ -1,49 +1,58 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setStatus("Authenticating...");
 
-    const supabase = createClient();
+    try {
+      const supabase = createClient();
+      let authError: { message: string } | null = null;
 
-    if (isSignUp) {
-      const { error: signUpError } = await supabase.auth.signUp({
-        email,
-        password,
-      });
-      if (signUpError) {
-        setError(signUpError.message);
+      if (isSignUp) {
+        const { error: err } = await supabase.auth.signUp({ email, password });
+        authError = err;
+      } else {
+        const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+        authError = err;
+      }
+
+      if (authError) {
+        setError(authError.message);
+        setStatus(null);
         setLoading(false);
         return;
       }
-      // Supabase may require email confirmation — check your project settings
-      // For dev, you can disable "Confirm email" in Supabase Dashboard > Auth > Providers > Email
-      router.push("/dashboard");
-    } else {
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-      if (signInError) {
-        setError(signInError.message);
+
+      // Auth succeeded — verify session is actually set
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setError("Auth succeeded but no session was created. Check Supabase email confirmation settings.");
+        setStatus(null);
         setLoading(false);
         return;
       }
-      router.push("/dashboard");
+
+      setStatus("Logged in! Redirecting...");
+      // Full page load so the server-side proxy sees the auth cookie
+      window.location.replace("/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+      setStatus(null);
+      setLoading(false);
     }
   };
 
@@ -72,12 +81,18 @@ export default function LoginPage() {
             onChange={(e) => setPassword(e.target.value)}
             required
             minLength={6}
-            className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 pr-12 text-white placeholder-zinc-500 outline-none focus:border-zinc-500"
+            className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 pr-14 text-white placeholder-zinc-500 outline-none focus:border-zinc-500"
           />
           <button
             type="button"
-            onClick={() => setShowPassword(!showPassword)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+            tabIndex={-1}
+            onPointerDown={(e) => {
+              // preventDefault on pointerdown stops the browser from blurring
+              // the input (which would dismiss the mobile keyboard)
+              e.preventDefault();
+              setShowPassword((prev) => !prev);
+            }}
+            className="absolute right-0 top-0 z-10 flex h-full w-14 items-center justify-center text-zinc-500 active:text-zinc-300"
           >
             {showPassword ? (
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -94,6 +109,7 @@ export default function LoginPage() {
         </div>
 
         {error && <p className="text-sm text-red-400">{error}</p>}
+        {status && <p className="text-sm text-blue-400">{status}</p>}
 
         <button
           type="submit"
