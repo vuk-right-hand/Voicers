@@ -77,7 +77,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 voiceStore.setInterimText(msg.text);
               }
             } else if (msg.type === "voice-status") {
-              useVoiceStore.getState().setStatus(msg.status);
+              // "listening" is set locally in startListening() — ignore host echo
+              // to avoid race where _start_voice resolves after voice-stop already ran.
+              if (msg.status !== "listening") {
+                useVoiceStore.getState().setStatus(msg.status);
+              }
             }
           } catch {
             // ignore malformed messages

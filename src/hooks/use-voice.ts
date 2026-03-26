@@ -309,8 +309,15 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
     }
 
     const store = useVoiceStore.getState();
-    // Only go to processing if we had content, otherwise just idle
-    if (store.transcript || store.finalText) {
+    if (store.mode === "dictation") {
+      // Status goes idle immediately (mic is off, no spinner).
+      // mode stays "dictation" if there's text — prevents modal auto-close.
+      // is_final from host will arrive shortly and update the transcript.
+      store.setStatus("idle");
+      if (!store.transcript && !store.interimText) {
+        store.setMode(null); // Nothing captured → let modal close
+      }
+    } else if (store.transcript || store.finalText) {
       store.setStatus("processing");
     } else {
       store.setStatus("idle");

@@ -115,22 +115,12 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
         // Double-tap!
         lastTapTime.current = 0;
 
-        if (showDictation) {
-          // Second double-tap while dictation open → accept
-          const fullText = (transcript + (interimText ? " " + interimText : "")).trim();
-          if (fullText) {
-            stopListening();
-            acceptDictation(fullText);
-          }
-          setShowDictation(false);
-        } else if (status === "listening") {
-          // Already listening → stop
-          stopListening();
-        } else {
-          // Start dictation
+        if (!showDictation && status !== "listening") {
+          // Start dictation — modal has Accept/Cancel to finish
           setShowDictation(true);
           startListening("dictation");
         }
+        // If modal already open: ignore double-tap, user uses Accept/Cancel buttons
       } else {
         lastTapTime.current = now;
       }
@@ -140,12 +130,8 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
       wheelVoiceDetected,
       showDictation,
       status,
-      transcript,
-      interimText,
       startListening,
       stopListening,
-      acceptDictation,
-      cancelDictation,
       sendCommand,
     ],
   );
@@ -215,7 +201,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
     }
   }, [showWheel, interimText]);
 
-  // Close dictation when processing finishes and goes back to idle
+  // Close dictation when voice returns to idle with no active mode
   useEffect(() => {
     if (status === "idle" && mode === null && showDictation) {
       setShowDictation(false);
@@ -362,9 +348,6 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
                 <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
                 <span className="text-sm text-white/60">Listening...</span>
               </>
-            )}
-            {status === "processing" && (
-              <span className="text-sm text-white/60">Processing...</span>
             )}
           </div>
 

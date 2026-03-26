@@ -9,7 +9,7 @@
 * **ICE Queue:** Both clients MUST queue incoming ICE candidates until the Remote Description is fully set.
 * **Video Transport:** Native `MediaStream` direct to `<video autoPlay playsInline muted>`. 
 * **Banned:** NEVER stream video over WebSockets. NEVER use Object URLs for frames. 
-* **Host Processing:** Python MUST downscale screen capture to max 1280x720 before WebRTC encoding.
+* **Host Processing:** Python MUST downscale screen capture to max 1920x1080 before WebRTC encoding.
 
 ## 2. Gesture Engine (Sticky Scope)
 We own 100% of gestures. Use native `TouchEvent` API (`onTouchStart/Move/End`), NOT `PointerEvents`.
@@ -23,14 +23,15 @@ We own 100% of gestures. Use native `TouchEvent` API (`onTouchStart/Move/End`), 
   * **Idle + 2-Finger Drag:** Scroll (`sendScroll`).
 
 ## 3. Voice Engine & Hardware Control
-* **Deepgram STT:** Always pass `keywords=["Next.js:10", "FastAPI:10", "pyautogui:10"]` (and other tech slang) to bias the transcription.
-* **Two-Lane Shortcut Engine:** Voice parsing executes on the Python Host via local `shortcuts.json`.
-  * **Lane 1 (Dictation):** String replacement (e.g., "repo" -> "repository").
-  * **Lane 2 (Commands):** Direct OS macros (e.g., "go" -> `pyautogui.press('enter')`).
+* **Gemini 2.5 Flash Live API:** Unified STT brain via `host/gemini_live.py`. Bidirectional WebSocket streams 16kHz PCM in, receives two text signals:
+  * **`input_transcription`** (the "Ear"): Raw ASR, used for fast interim UI updates only.
+  * **`model_turn`** (the "Brain"): LLM-corrected output with coding slang auto-fix (e.g., "use effect" → "useEffect"). Accumulated in `model_buffer`, flushed as `is_final=True` only on `voice-stop`.
+* **No TTS / No AI talk-back:** Pipeline is silent. Audio in → text out. No Jarvis, no OpenAI, no spoken feedback.
+* **Command Wheel:** OS macros (Stop, Terminal, Send, Clear, Save) execute via gesture selection on the wheel, not voice parsing.
 * **Hardware Config:** `host/input.py` MUST set `pyautogui.PAUSE = 0` and `pyautogui.FAILSAFE = False` to allow zero-latency physical double-taps.
 
 ## 4. Architecture & Security Boundaries
-* **BYOK Security:** API keys (OpenAI, Deepgram) NEVER touch Supabase. Store in `host/.env` or PWA `localStorage`.
+* **BYOK Security:** API keys (Gemini) NEVER touch Supabase. Store in `host/.env` or PWA `localStorage`.
 * **No Secrets in Client Code:** Only `NEXT_PUBLIC_` for truly public values (Supabase URL, anon key). Never expose API keys in the client bundle.
 * **Data-First Rule:** Define exact Supabase schemas and JSON payloads. Get explicit user confirmation before writing logic.
 * **RLS:** Enforce on all tables. Assume PWA is entirely insecure.

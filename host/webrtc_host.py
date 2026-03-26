@@ -19,9 +19,7 @@ from aiortc.contrib.media import MediaStreamTrack
 import av
 
 from input import tap, type_text, type_text_paste, scroll, execute_command
-from stt import DeepgramSTT
-from tts import TextToSpeech
-from ai import JarvisAI
+from gemini_live import GeminiLive
 from screen import get_screen_size
 from supabase_client import (
     upsert_session,
@@ -34,9 +32,9 @@ from supabase_client import (
 logger = logging.getLogger(__name__)
 
 # Target resolution for streaming (downscale from native)
-STREAM_WIDTH = 1280
-STREAM_HEIGHT = 720
-TARGET_FPS = 15
+STREAM_WIDTH = 1920
+STREAM_HEIGHT = 1080
+TARGET_FPS = 25
 
 
 class ScreenCaptureTrack(MediaStreamTrack):
@@ -99,12 +97,9 @@ class WebRTCHost:
         self._running = False
 
         # Voice engine
-        self._stt: DeepgramSTT | None = None
-        self._tts = TextToSpeech()
-        self._jarvis = JarvisAI()
+        self._gemini: GeminiLive | None = None
         self._voice_active = False
         self._voice_mode: str | None = None  # "dictation" | "command"
-        self._command_transcript: list[str] = []  # accumulates final STT chunks in command mode
 
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
@@ -206,6 +201,17 @@ class WebRTCHost:
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
 
+        # Best-effort: hint higher bitrate for the video sender
+        try:
+            for sender in self.pc.getSenders():
+                if sender.track and sender.track.kind == "video":
+                    params = sender.getParameters()
+                    if params.encodings:
+                        params.encodings[0].maxBitrate = 3_000_000  # 3 Mbps
+                        await sender.setParameters(params)
+        except Exception:
+            pass  # aiortc may not honour this; 1080p resolution is the real fix
+
         # Send answer to phone via Supabase
         write_signaling(self.session_id, {
             "type": "answer",
@@ -244,9 +250,9 @@ class WebRTCHost:
         def on_message(message):
             # Binary message = raw PCM audio from phone mic
             if isinstance(message, bytes):
-                if self._voice_active and self._stt:
+                if self._voice_active and self._gemini:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(self._stt.send_audio(message))
+                    loop.create_task(self._gemini.send_audio(message))
                 return
 
             try:
@@ -301,103 +307,53 @@ class WebRTCHost:
         @channel.on("close")
         def on_close():
             logger.info("Data channel closed")
-            # Clean up any active voice session (no Jarvis on disconnect)
+            # Clean up any active voice session on disconnect
             if self._voice_active:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._stop_voice(channel=None))
 
     async def _start_voice(self, channel):
-        """Start a Deepgram STT session."""
+        """Start a Gemini Live STT session."""
         self._voice_active = True
-        self._command_transcript = []
 
         def on_transcript(text: str, is_final: bool):
-            """Send transcription to phone and accumulate finals for command mode."""
+            """Forward transcription to phone over data channel."""
             if channel.readyState == "open":
                 channel.send(json.dumps({
                     "type": "stt",
                     "text": text,
                     "is_final": is_final,
                 }))
-            # Accumulate final chunks so host can act on the full spoken command
-            if is_final and text:
-                self._command_transcript.append(text)
 
-        self._stt = DeepgramSTT(on_transcript=on_transcript)
-        await self._stt.start()
+        self._gemini = GeminiLive(on_transcript=on_transcript)
+        await self._gemini.start()
 
-        # Tell phone we're listening
         if channel.readyState == "open":
-            channel.send(json.dumps({
-                "type": "voice-status",
-                "status": "listening",
-            }))
+            channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
         logger.info("Voice session started (mode=%s)", self._voice_mode)
 
     async def _stop_voice(self, channel=None):
-        """Stop the active Deepgram STT session."""
-        mode = self._voice_mode  # capture before clearing
-
-        if self._stt:
-            await self._stt.stop()
-            self._stt = None
-
+        """Stop the active Gemini Live session and flush final transcript."""
         self._voice_active = False
         self._voice_mode = None
 
-        # If a voice command was spoken, trigger Jarvis with the full transcript
-        if mode == "command" and self._command_transcript and channel:
-            spoken = " ".join(self._command_transcript).strip()
-            self._command_transcript = []
-            if spoken:
-                logger.info("Voice command spoken: %s", spoken)
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._jarvis_feedback(channel, spoken))
-        else:
-            self._command_transcript = []
+        if self._gemini:
+            # Flush accumulated ASR buffer as is_final=True — no waiting needed
+            final_text = self._gemini.interim_buffer.strip()
+            if final_text and channel and channel.readyState == "open":
+                channel.send(json.dumps({
+                    "type": "stt",
+                    "text": final_text,
+                    "is_final": True,
+                }))
+            await self._gemini.stop()
+            self._gemini = None
+
+        if channel and channel.readyState == "open":
+            channel.send(json.dumps({"type": "voice-status", "status": "idle"}))
 
         logger.info("Voice session stopped")
-
-    async def _jarvis_feedback(self, channel, action: str):
-        """Generate Jarvis AI response + TTS after a command, then send to phone."""
-        try:
-            # Small delay to let the command take effect on screen
-            await asyncio.sleep(0.5)
-
-            # Tell phone we're processing
-            if channel.readyState == "open":
-                channel.send(json.dumps({
-                    "type": "voice-status",
-                    "status": "processing",
-                }))
-
-            # Get Jarvis response (includes screenshot) — run in thread to avoid blocking event loop
-            jarvis_text = await asyncio.to_thread(self._jarvis.get_response, action)
-            if not jarvis_text:
-                return
-
-            # Generate TTS audio — also blocking, run in thread
-            mp3_bytes = await asyncio.to_thread(self._tts.speak, jarvis_text)
-            if not mp3_bytes:
-                return
-
-            # Send raw MP3 binary directly over data channel
-            if channel.readyState == "open":
-                channel.send(json.dumps({
-                    "type": "voice-status",
-                    "status": "speaking",
-                }))
-                channel.send(mp3_bytes)
-
-        except Exception:
-            logger.exception("Jarvis feedback failed")
-        finally:
-            if channel.readyState == "open":
-                channel.send(json.dumps({
-                    "type": "voice-status",
-                    "status": "idle",
-                }))
 
     async def stop(self):
         """Clean shutdown."""
