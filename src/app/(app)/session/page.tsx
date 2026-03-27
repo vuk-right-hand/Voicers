@@ -132,9 +132,19 @@ export default function SessionPage() {
     setMode("voice");
   };
 
-  const handlePaste = () => {
-    if (copiedText) {
-      sendCommand({ type: "type-text", text: copiedText });
+  const handlePaste = async () => {
+    let textToPaste = "";
+
+    // Try to read phone's current clipboard first (user copied from Safari, Notes, etc)
+    try {
+      textToPaste = await navigator.clipboard.readText();
+    } catch {
+      // Fallback to stored copiedText if clipboard read fails or permission denied
+      textToPaste = copiedText;
+    }
+
+    if (textToPaste) {
+      sendCommand({ type: "type-text", text: textToPaste });
     }
     setCopiedText("");
   };
@@ -291,16 +301,12 @@ export default function SessionPage() {
           >
             Disconnect
           </button>
-          {/* Paste pill — hollow/dim when empty, solid white when ready */}
+          {/* Paste pill — permanent active color (always ready for on-demand clipboard injection) */}
           <button
             type="button"
             onClick={handlePaste}
             onTouchEnd={(e) => { e.stopPropagation(); handlePaste(); }}
-            className={`rounded-full px-4 py-2 text-sm transition-all duration-200 ${
-              copiedText
-                ? "bg-white text-black font-semibold opacity-100 border border-white"
-                : "bg-transparent text-white/75 border border-white/40 opacity-75"
-            }`}
+            className="rounded-full px-4 py-2 text-sm font-semibold bg-white text-black transition-all duration-200 active:scale-95"
           >
             Paste
           </button>
@@ -322,16 +328,12 @@ export default function SessionPage() {
           >
             Disconnect
           </button>
-          {/* Paste pill — hollow/dim when empty, solid white when ready */}
+          {/* Paste pill — permanent active color (always ready for on-demand clipboard injection) */}
           <button
             type="button"
             onClick={handlePaste}
             onTouchEnd={(e) => { e.stopPropagation(); handlePaste(); }}
-            className={`rounded-full px-4 py-2 text-sm transition-all duration-200 ${
-              copiedText
-                ? "bg-white text-black font-semibold opacity-100 border border-white"
-                : "bg-transparent text-white/75 border border-white/40 opacity-75"
-            }`}
+            className="rounded-full px-4 py-2 text-sm font-semibold bg-white text-black transition-all duration-200 active:scale-95"
           >
             Paste
           </button>

@@ -15,6 +15,8 @@ interface SessionState {
   mediaStream: MediaStream | null;
   /** WebRTC data channel for commands */
   dataChannel: RTCDataChannel | null;
+  /** WebRTC peer connection (for ICE restart on app resume) */
+  pc: RTCPeerConnection | null;
   /** Host screen dimensions (native, before downscale) */
   screenWidth: number;
   screenHeight: number;
@@ -63,6 +65,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   transportStatus: "idle",
   mediaStream: null,
   dataChannel: null,
+  pc: null,
   screenWidth: 0,
   screenHeight: 0,
   remoteCursorPos: null,
@@ -74,7 +77,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     _close?.();
     set({ sessionId, transportStatus: "signaling", mediaStream: null, dataChannel: null });
 
-    const { close } = initiateCall(
+    const { pc, close } = initiateCall(
       sessionId,
       // onStream
       (stream) => set({ mediaStream: stream }),
@@ -137,7 +140,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       },
     );
 
-    _close = close;
+    // Store the pc for ICE restart on app resume
+    set({ pc });
+
+    // Listen for app visibility changes — restart ICE if connection dropped
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        const currentState = get();
+        if (
+          currentState.pc &&
+          (currentState.pc.connectionState === "disconnected" ||
+            currentState.pc.connectionState === "failed")
+        ) {
+          currentState.pc.restartIce();
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    _close = () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      close();
+    };
   },
 
   disconnect: () => {
@@ -147,6 +172,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       transportStatus: "idle",
       mediaStream: null,
       dataChannel: null,
+      pc: null,
       sessionId: null,
       remoteCursorPos: null,
     });

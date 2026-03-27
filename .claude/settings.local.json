@@ -12,7 +12,12 @@
       "Bash(npx tsc --noEmit)",
       "Bash(pip install deepgram-sdk openai pyperclip)",
       "Bash(venv/Scripts/pip install openai deepgram-sdk pyperclip)",
-      "Bash(venv/Scripts/pip show openai deepgram-sdk pyperclip)"
+      "Bash(venv/Scripts/pip show openai deepgram-sdk pyperclip)",
+      "Bash(venv/Scripts/pip install \"google-genai>=1.0.0\")",
+      "Bash(venv/Scripts/python -c \":*)",
+      "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/session/)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

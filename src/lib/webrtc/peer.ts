@@ -18,6 +18,7 @@ const RTC_CONFIG: RTCConfiguration = {
 export interface PeerConnection {
   stream: MediaStream;
   dataChannel: RTCDataChannel;
+  pc: RTCPeerConnection;
   close: () => void;
 }
 
@@ -30,7 +31,7 @@ export function initiateCall(
   onStream: (stream: MediaStream) => void,
   onDataChannel: (dc: RTCDataChannel) => void,
   onStateChange: (state: RTCPeerConnectionState) => void,
-): { close: () => void } {
+): { pc: RTCPeerConnection; close: () => void } {
   const pc = new RTCPeerConnection(RTC_CONFIG);
   const iceQueue: RTCIceCandidateInit[] = [];
   let remoteDescriptionSet = false;
@@ -118,6 +119,7 @@ export function initiateCall(
   })();
 
   return {
+    pc,
     close: () => {
       channel?.unsubscribe();
       dataChannel.close();
