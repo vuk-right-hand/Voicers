@@ -18,7 +18,13 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaStreamTrack
 import av
 
-from input import tap, type_text, type_text_paste, scroll, execute_command
+import pyperclip
+
+from input import (
+    tap, type_text, type_text_paste, scroll, execute_command,
+    mousemove_relative, mousedown, mouseup, click, double_click,
+    get_cursor_pos,
+)
 from gemini_live import GeminiLive
 from screen import get_screen_size
 from supabase_client import (
@@ -290,10 +296,30 @@ class WebRTCHost:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._stop_voice(channel))
 
+            # ── Trackpad mode commands ──────────────────────────────
+
+            elif cmd_type == "mousemove":
+                mousemove_relative(data["dx"], data["dy"])
+
+            elif cmd_type == "mousedown":
+                mousedown()
+
+            elif cmd_type == "mouseup":
+                mouseup()
+
+            elif cmd_type == "click":
+                click()
+
+            elif cmd_type == "double-click":
+                double_click()
+
+            elif cmd_type == "get-clipboard":
+                text = pyperclip.paste()
+                channel.send(json.dumps({"type": "clipboard", "text": text}))
+
             else:
                 logger.warning("Unknown command type: %s", cmd_type)
 
-        @channel.on("open")
         def on_open():
             logger.info("Data channel open")
             # Send screen info to phone
@@ -303,6 +329,17 @@ class WebRTCHost:
                 "width": w,
                 "height": h,
             }))
+            # Start broadcasting cursor position to phone (~20 Hz)
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._cursor_broadcast_loop(channel))
+
+        channel.on("open", on_open)
+
+        # aiortc fires 'open' before _setup_data_channel runs when the phone
+        # creates the channel — the listener above would be attached too late.
+        # Call on_open() directly if the channel is already open.
+        if channel.readyState == "open":
+            on_open()
 
         @channel.on("close")
         def on_close():
@@ -354,6 +391,20 @@ class WebRTCHost:
             channel.send(json.dumps({"type": "voice-status", "status": "idle"}))
 
         logger.info("Voice session stopped")
+
+    async def _cursor_broadcast_loop(self, channel):
+        """Broadcasts normalized PC cursor position to phone at ~20 Hz."""
+        screen_w, screen_h = get_screen_size()
+        if not screen_w or not screen_h:
+            return
+        while channel.readyState == "open":
+            x, y = get_cursor_pos()
+            channel.send(json.dumps({
+                "type": "cursor-pos",
+                "x": round(x / screen_w, 4),
+                "y": round(y / screen_h, 4),
+            }))
+            await asyncio.sleep(0.05)  # 20 Hz
 
     async def stop(self):
         """Clean shutdown."""

@@ -94,3 +94,36 @@ def execute_command(action: str, payload: dict) -> str | None:
         return None
 
     return "unknown_action"
+
+
+# ─── Trackpad Mode ────────────────────────────────────────────────────────────
+
+
+def mousemove_relative(dx: float, dy: float) -> None:
+    """Move mouse cursor relatively by dx, dy pixels."""
+    pyautogui.moveRel(int(dx), int(dy))
+
+
+def mousedown() -> None:
+    """Press and hold the primary mouse button."""
+    pyautogui.mouseDown()
+
+
+def mouseup() -> None:
+    """Release the primary mouse button."""
+    pyautogui.mouseUp()
+
+
+def click() -> None:
+    """Click at current cursor position (no coordinates — trackpad mode)."""
+    pyautogui.click()
+
+
+def double_click() -> None:
+    """Double-click at current cursor position (OS-native word select)."""
+    pyautogui.doubleClick()
+
+
+def get_cursor_pos() -> tuple[int, int]:
+    """Return current cursor position as (x, y) in screen pixels."""
+    return pyautogui.position()

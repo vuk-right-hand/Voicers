@@ -13,9 +13,16 @@ import {
 interface CommsButtonProps {
   dataChannel: RTCDataChannel | null;
   sendCommand: (cmd: { type: "command"; action: string; payload: Record<string, unknown> }) => void;
+  positionClassName?: string;
+  isLandscape?: boolean;
 }
 
-export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
+export function CommsButton({
+  dataChannel,
+  sendCommand,
+  positionClassName,
+  isLandscape = false,
+}: CommsButtonProps) {
   const { startListening, stopListening, acceptDictation, cancelDictation } =
     useVoice({ dataChannel });
 
@@ -36,6 +43,18 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
   const buttonRef = useRef<HTMLDivElement>(null);
   const buttonCenter = useRef({ x: 0, y: 0 });
 
+  // ─── Wheel geometry helpers ──────────────────────────────────────────────
+
+  /** Compute slice angle for rendering and hit-testing */
+  const getWheelAngles = useCallback(() => {
+    // Portrait: full top semicircle (PI→0) — button is bottom-center, safe to open left+right
+    // Landscape: top-left quadrant (PI→PI/2) — button is bottom-right, right half would clip off-screen
+    const startAngle = Math.PI;
+    const endAngle = isLandscape ? Math.PI / 2 : 0;
+    const arcSpan = startAngle - endAngle;
+    return { startAngle, endAngle, arcSpan };
+  }, [isLandscape]);
+
   // ─── Double-tap / Hold detection on Comms Button ───────────────────────
 
   const onButtonTouchStart = useCallback(
@@ -52,16 +71,12 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
         };
       }
 
-      // Unlock audio on first ever interaction
       unlockAudioContext();
 
-      // Start hold timer for command wheel
       holdTimer.current = setTimeout(() => {
         isHolding.current = true;
         setShowWheel(true);
         setWheelVoiceDetected(false);
-        // Try to start listening in command mode for voice-on-wheel
-        // (fails gracefully if no mic / insecure context)
         startListening("command").catch(() => {});
       }, COMMS_HOLD_MS);
     },
@@ -71,30 +86,26 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
   const onButtonTouchEnd = useCallback(
     (e: React.TouchEvent) => {
       e.stopPropagation();
+      e.preventDefault();
 
-      // Clear hold timer
       if (holdTimer.current) {
         clearTimeout(holdTimer.current);
         holdTimer.current = null;
       }
 
       if (isHolding.current) {
-        // ── Wheel release ────────────────────────────────────────────
         isHolding.current = false;
 
         if (wheelVoiceDetected) {
-          // Voice detected during hold → stop listening, let host process
           stopListening();
           setShowWheel(false);
           setActiveSlice(null);
           return;
         }
 
-        // Stop mic
         stopListening();
 
         if (activeSlice !== null) {
-          // Drag-to-slice: execute and close
           const cmd = WHEEL_COMMANDS[activeSlice];
           sendCommand({
             type: "command",
@@ -105,22 +116,18 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
           setShowWheel(false);
           setActiveSlice(null);
         }
-        // activeSlice === null → wheel stays open for tap-to-pick mode
         return;
       }
 
       // ── Double-tap detection ─────────────────────────────────────────
       const now = Date.now();
       if (now - lastTapTime.current < COMMS_DOUBLE_TAP_MS) {
-        // Double-tap!
         lastTapTime.current = 0;
 
         if (!showDictation && status !== "listening") {
-          // Start dictation — modal has Accept/Cancel to finish
           setShowDictation(true);
           startListening("dictation");
         }
-        // If modal already open: ignore double-tap, user uses Accept/Cancel buttons
       } else {
         lastTapTime.current = now;
       }
@@ -153,35 +160,31 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
         return;
       }
 
-      // atan2 gives angle from positive X axis. We need to map to our
-      // top-facing semicircle: slices span from PI (left) to 0 (right),
-      // i.e. the upper half. Angle = atan2(-dy, dx) flips Y so "up" is positive.
       const angle = Math.atan2(-dy, dx); // 0 = right, PI = left, negative = below
+      const { endAngle, arcSpan } = getWheelAngles();
 
-      // Only activate if thumb is in the upper half (angle > 0)
-      if (angle <= 0) {
+      // Only activate if thumb is in valid zone
+      if (angle <= endAngle) {
         setActiveSlice(null);
         return;
       }
 
-      // Map angle PI→0 to slice index 0→(N-1)
-      // angle=PI is leftmost (slice 0), angle=0 is rightmost (slice N-1)
-      const sliceAngle = Math.PI / WHEEL_COMMANDS.length;
+      // Map angle to slice index
+      const sliceAngle = arcSpan / WHEEL_COMMANDS.length;
       const sliceIndex = Math.floor((Math.PI - angle) / sliceAngle);
-      setActiveSlice(Math.min(sliceIndex, WHEEL_COMMANDS.length - 1));
+      setActiveSlice(Math.min(Math.max(0, sliceIndex), WHEEL_COMMANDS.length - 1));
     },
-    [showWheel],
+    [showWheel, getWheelAngles],
   );
 
-  // Fallback dismiss / drag-from-open-wheel: release on overlay background
   const onWheelOverlayTouchEnd = useCallback(
     (e: React.TouchEvent) => {
       e.stopPropagation();
+      e.preventDefault();
       if (!showWheel) return;
       isHolding.current = false;
       stopListening();
       if (activeSlice !== null) {
-        // Drag that started on overlay ended over a highlighted slice — execute
         const cmd = WHEEL_COMMANDS[activeSlice];
         sendCommand({ type: "command", action: cmd.action, payload: { ...cmd.payload } });
         useVoiceStore.getState().reset();
@@ -194,7 +197,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
     [showWheel, activeSlice, stopListening, cancelDictation, sendCommand],
   );
 
-  // Listen for voice detection during wheel (interim STT means voice detected)
+  // Listen for voice detection during wheel
   useEffect(() => {
     if (showWheel && interimText) {
       setWheelVoiceDetected(true);
@@ -228,6 +231,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
   // ─── Render ────────────────────────────────────────────────────────────
 
   const displayText = (transcript + (interimText ? " " + interimText : "")).trim();
+  const { arcSpan } = getWheelAngles();
 
   return (
     <>
@@ -236,6 +240,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
         <div
           className="fixed inset-0 z-50"
           style={{ backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" }}
+          onTouchStart={(e) => { e.stopPropagation(); e.preventDefault(); }}
           onTouchMove={onWheelTouchMove}
           onTouchEnd={onWheelOverlayTouchEnd}
         >
@@ -247,13 +252,16 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
               top: buttonCenter.current.y,
             }}
           >
-            {/* Slices — top-facing semicircle (arch above button) */}
+            {/* Slices — orientation-aware arc */}
             {WHEEL_COMMANDS.map((cmd, i) => {
-              // Spread evenly across PI→0 (left to right, upper half)
+              // Landscape: larger radius (190) to spread slices across 90° arc, smaller pill (58)
+              // Portrait: standard radius (130) with full semicircle, standard pill (72)
+              const effectiveRadius = isLandscape ? 190 : WHEEL_RADIUS;
+              const sliceSize = isLandscape ? 58 : 72;
               const angle =
-                Math.PI - ((i + 0.5) * Math.PI) / WHEEL_COMMANDS.length;
-              const x = Math.cos(angle) * WHEEL_RADIUS;
-              const y = -Math.sin(angle) * WHEEL_RADIUS; // negative = upward
+                Math.PI - ((i + 0.5) * arcSpan) / WHEEL_COMMANDS.length;
+              const x = Math.cos(angle) * effectiveRadius;
+              const y = -Math.sin(angle) * effectiveRadius;
               const isActive = activeSlice === i;
 
               return (
@@ -265,15 +273,16 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
                       : "bg-white/15 text-white"
                   }`}
                   style={{
-                    width: 72,
-                    height: 72,
-                    left: x - 36,
-                    top: y - 36,
+                    width: sliceSize,
+                    height: sliceSize,
+                    left: x - sliceSize / 2,
+                    top: y - sliceSize / 2,
                     backdropFilter: isActive ? undefined : "blur(4px)",
                   }}
-                  onTouchStart={(e) => { e.stopPropagation(); setActiveSlice(i); }}
+                  onTouchStart={(e) => { e.stopPropagation(); e.preventDefault(); setActiveSlice(i); }}
                   onTouchEnd={(e) => {
                     e.stopPropagation();
+                    e.preventDefault();
                     sendCommand({ type: "command", action: cmd.action, payload: { ...cmd.payload } });
                     useVoiceStore.getState().reset();
                     stopListening();
@@ -326,9 +335,15 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
 
       {/* ── Dictation Modal (Bottom Sheet) ────────────────────────────── */}
       {showDictation && (
-        <div className="fixed inset-x-0 bottom-0 z-40 flex flex-col bg-zinc-900/95 backdrop-blur-xl"
+        <div
+          className={`fixed z-40 flex flex-col bg-zinc-900/95 backdrop-blur-xl ${
+            isLandscape
+              ? "bottom-0 left-1/2 -translate-x-1/2 rounded-t-3xl"
+              : "inset-x-0 bottom-0"
+          }`}
           style={{
             maxHeight: "50dvh",
+            ...(isLandscape ? { maxWidth: "60vw", width: "60vw" } : {}),
             borderTopLeftRadius: 24,
             borderTopRightRadius: 24,
           }}
@@ -360,7 +375,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
             </p>
           </div>
 
-          {/* Actions — flex-shrink-0 so buttons never get pushed off-screen */}
+          {/* Actions */}
           <div className="flex gap-3 px-5 pb-6 pt-2 flex-shrink-0">
             <button
               type="button"
@@ -384,7 +399,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
       {/* ── Comms FAB ─────────────────────────────────────────────────── */}
       <div
         ref={buttonRef}
-        className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2"
+        className={`fixed z-50 ${positionClassName || "bottom-6 right-4"}`}
         onTouchStart={onButtonTouchStart}
         onTouchEnd={onButtonTouchEnd}
         onTouchMove={onWheelTouchMove}
@@ -413,7 +428,7 @@ export function CommsButton({ dataChannel, sendCommand }: CommsButtonProps) {
             </svg>
           )}
 
-          {/* Listening — pulse ring (suppressed during wheel: use center indicator instead) */}
+          {/* Listening — pulse ring */}
           {status === "listening" && (
             <>
               {!showWheel && <span className="absolute inset-0 rounded-full border-2 border-red-400 animate-ping opacity-30" />}

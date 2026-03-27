@@ -4,6 +4,7 @@ import { create } from "zustand";
 import type { PcStatus, TransportStatus, PhoneCommand } from "@/types";
 import { initiateCall } from "@/lib/webrtc/peer";
 import { useVoiceStore, playTTSAudio } from "@/hooks/use-voice";
+import { CLIPBOARD_TIMEOUT_MS } from "@/lib/constants";
 
 interface SessionState {
   /** Host status from Supabase */
@@ -17,6 +18,8 @@ interface SessionState {
   /** Host screen dimensions (native, before downscale) */
   screenWidth: number;
   screenHeight: number;
+  /** Live PC cursor position, normalized 0–1, broadcast by host at ~20 Hz */
+  remoteCursorPos: { x: number; y: number } | null;
   /** Pocket mode (OLED blackout) */
   isPocketMode: boolean;
   /** Session ID from Supabase */
@@ -32,6 +35,29 @@ interface SessionState {
 
 let _close: (() => void) | null = null;
 
+// ─── Clipboard pre-fetch (same module-level pattern as _close) ──────────────
+
+let _clipboardResolve: ((text: string) => void) | null = null;
+
+/**
+ * Returns a Promise that resolves with the PC clipboard text when the host
+ * responds to a "get-clipboard" request. Resolves with "" after CLIPBOARD_TIMEOUT_MS
+ * to prevent UI soft-lock if the host is unreachable.
+ */
+export function awaitClipboard(): Promise<string> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      _clipboardResolve = null;
+      resolve("");
+    }, CLIPBOARD_TIMEOUT_MS);
+
+    _clipboardResolve = (text: string) => {
+      clearTimeout(timer);
+      resolve(text);
+    };
+  });
+}
+
 export const useSessionStore = create<SessionState>((set, get) => ({
   pcStatus: "offline",
   transportStatus: "idle",
@@ -39,6 +65,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   dataChannel: null,
   screenWidth: 0,
   screenHeight: 0,
+  remoteCursorPos: null,
   isPocketMode: false,
   sessionId: null,
 
@@ -68,6 +95,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
             if (msg.type === "screen-info") {
               set({ screenWidth: msg.width, screenHeight: msg.height });
+            } else if (msg.type === "cursor-pos") {
+              set({ remoteCursorPos: { x: msg.x, y: msg.y } });
             } else if (msg.type === "stt") {
               const voiceStore = useVoiceStore.getState();
               if (msg.is_final) {
@@ -76,6 +105,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               } else {
                 voiceStore.setInterimText(msg.text);
               }
+            } else if (msg.type === "clipboard") {
+              _clipboardResolve?.(msg.text);
+              _clipboardResolve = null;
             } else if (msg.type === "voice-status") {
               // "listening" is set locally in startListening() — ignore host echo
               // to avoid race where _start_voice resolves after voice-stop already ran.
@@ -116,6 +148,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       mediaStream: null,
       dataChannel: null,
       sessionId: null,
+      remoteCursorPos: null,
     });
   },
 

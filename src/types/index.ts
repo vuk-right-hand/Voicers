@@ -37,7 +37,13 @@ export type PhoneCommand =
   | { type: "command"; action: string; payload: Record<string, unknown> }
   | { type: "voice-start"; mode: "dictation" | "command" }
   | { type: "voice-stop" }
-  | { type: "type-text"; text: string };
+  | { type: "type-text"; text: string }
+  | { type: "mousemove"; dx: number; dy: number }
+  | { type: "mousedown" }
+  | { type: "mouseup" }
+  | { type: "click" }
+  | { type: "double-click" }
+  | { type: "get-clipboard" };
 // Note: binary ArrayBuffer (raw PCM audio) is also sent but not typed here
 
 // Host → Phone (via data channel)
@@ -45,7 +51,8 @@ export type HostMessage =
   | { type: "screen-info"; width: number; height: number }
   | { type: "error"; message: string }
   | { type: "stt"; text: string; is_final: boolean }
-  | { type: "voice-status"; status: "listening" | "processing" | "speaking" | "idle" };
+  | { type: "voice-status"; status: "listening" | "processing" | "speaking" | "idle" }
+  | { type: "clipboard"; text: string };
 // Note: binary ArrayBuffer (raw MP3 TTS) is also sent but not typed here
 
 export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "failed";
