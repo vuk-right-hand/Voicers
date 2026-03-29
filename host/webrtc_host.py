@@ -18,19 +18,18 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaStreamTrack
 import av
 
-import pyperclip
-
 from input import (
-    tap, type_text, type_text_paste, scroll, execute_command,
+    tap, type_text, scroll, execute_command,
     mousemove_relative, mousedown, mouseup, click, double_click,
     get_cursor_pos,
+    type_text_paste_async, get_clipboard_async,
 )
 from gemini_live import GeminiLive
 from screen import get_screen_size
 from supabase_client import (
-    upsert_session,
-    write_signaling,
-    update_pc_status,
+    upsert_session_async,
+    write_signaling_async,
+    update_pc_status_async,
     subscribe_signaling,
     USER_ID,
 )
@@ -109,7 +108,7 @@ class WebRTCHost:
 
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
-        self.session_id = upsert_session()
+        self.session_id = await upsert_session_async()
         self._running = True
 
         # Subscribe to Realtime for signaling (now async, returns a task)
@@ -144,7 +143,7 @@ class WebRTCHost:
             logger.exception("FAILED to handle SDP offer")
             # Reset to host-ready so the phone can retry
             if self.session_id:
-                write_signaling(self.session_id, {
+                await write_signaling_async(self.session_id, {
                     "type": "host-ready",
                     "host_id": USER_ID,
                 })
@@ -183,11 +182,11 @@ class WebRTCHost:
             state = self.pc.connectionState
             logger.info("Connection state: %s", state)
             if state == "connected":
-                update_pc_status(self.session_id, "connected")
+                await update_pc_status_async(self.session_id, "connected")
             elif state in ("failed", "closed", "disconnected"):
-                update_pc_status(self.session_id, "waiting")
+                await update_pc_status_async(self.session_id, "waiting")
                 # Reset to host-ready for reconnection
-                write_signaling(self.session_id, {
+                await write_signaling_async(self.session_id, {
                     "type": "host-ready",
                     "host_id": USER_ID,
                 })
@@ -218,8 +217,9 @@ class WebRTCHost:
         except Exception:
             pass  # aiortc may not honour this; 1080p resolution is the real fix
 
-        # Send answer to phone via Supabase
-        write_signaling(self.session_id, {
+        # Send answer to phone via Supabase — async so the event loop stays free
+        # while ICE candidates are already arriving from the phone.
+        await write_signaling_async(self.session_id, {
             "type": "answer",
             "sdp": self.pc.localDescription.sdp,
             "from": "host",
@@ -279,8 +279,10 @@ class WebRTCHost:
                 type_text(data["text"])
 
             elif cmd_type == "type-text":
-                # Dictation accept → paste via clipboard (instant)
-                type_text_paste(data["text"])
+                # Paste via clipboard (instant). Goes through asyncio.Lock so it
+                # can't clobber a concurrent get-clipboard read mid-flight.
+                loop = asyncio.get_running_loop()
+                loop.create_task(type_text_paste_async(data["text"]))
 
             elif cmd_type == "command":
                 result = execute_command(data["action"], data.get("payload", {}))
@@ -314,8 +316,8 @@ class WebRTCHost:
                 double_click()
 
             elif cmd_type == "get-clipboard":
-                text = pyperclip.paste()
-                channel.send(json.dumps({"type": "clipboard", "text": text}))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._send_clipboard(channel))
 
             else:
                 logger.warning("Unknown command type: %s", cmd_type)
@@ -392,6 +394,12 @@ class WebRTCHost:
 
         logger.info("Voice session stopped")
 
+    async def _send_clipboard(self, channel):
+        """Read PC clipboard (with lock) and send it to the phone."""
+        text = await get_clipboard_async()
+        if channel.readyState == "open":
+            channel.send(json.dumps({"type": "clipboard", "text": text}))
+
     async def _cursor_broadcast_loop(self, channel):
         """Broadcasts normalized PC cursor position to phone at ~20 Hz."""
         screen_w, screen_h = get_screen_size()
@@ -414,7 +422,7 @@ class WebRTCHost:
         if self._channel:
             self._channel.cancel()
         if self.session_id:
-            update_pc_status(self.session_id, "offline")
+            await update_pc_status_async(self.session_id, "offline")
         logger.info("WebRTC host stopped")
 
 

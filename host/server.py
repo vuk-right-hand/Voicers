@@ -66,24 +66,24 @@ async def health():
 
 
 @app.post("/tap")
-async def handle_tap(req: TapRequest):
+def handle_tap(req: TapRequest):
     tap(req.x, req.y)
     return {"ok": True}
 
 
 @app.post("/type")
-async def handle_type(req: TypeRequest):
+def handle_type(req: TypeRequest):
     type_text(req.text)
     return {"ok": True}
 
 
 @app.post("/scroll")
-async def handle_scroll(req: ScrollRequest):
+def handle_scroll(req: ScrollRequest):
     scroll(req.delta)
     return {"ok": True}
 
 
 @app.post("/command")
-async def handle_command(req: CommandRequest):
+def handle_command(req: CommandRequest):
     result = execute_command(req.action, req.payload)
     return {"ok": True, "result": result}

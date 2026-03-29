@@ -29,15 +29,18 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Protected routes: redirect to login if not authenticated
+  // Protected routes: redirect to login if not authenticated or cross-device link not completed.
+  // The login page detects "session exists but unlinked" on mount and restores the Waiting Room.
   const isProtected =
     request.nextUrl.pathname.startsWith("/dashboard") ||
     request.nextUrl.pathname.startsWith("/session");
 
-  if (!user && isProtected) {
+  if (isProtected) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
-    return NextResponse.redirect(url);
+    if (!user || !user.user_metadata?.device_b_linked_at) {
+      return NextResponse.redirect(url);
+    }
   }
 
   return supabaseResponse;

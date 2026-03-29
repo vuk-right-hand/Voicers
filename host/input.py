@@ -3,11 +3,52 @@ Input control module — translates phone commands into mouse/keyboard actions.
 Uses pyautogui for cross-platform desktop control.
 """
 
+import asyncio
 import sys
 import time
 
 import pyautogui
 import pyperclip
+
+# ── Clipboard serialization lock ────────────────────────────────────────────────
+# type_text_paste() writes to the PC clipboard; get_clipboard_async() reads it.
+# Without a lock, a type-text command arriving while a get-clipboard response
+# is in-flight will clobber the clipboard mid-read (paste pill gets keyboard text
+# instead of the PC selection). Lock is created lazily inside the event loop.
+_clipboard_lock: asyncio.Lock | None = None
+
+
+def _get_clipboard_lock() -> asyncio.Lock:
+    global _clipboard_lock
+    if _clipboard_lock is None:
+        _clipboard_lock = asyncio.Lock()
+    return _clipboard_lock
+
+
+async def type_text_paste_async(text: str) -> None:
+    """Clipboard-paste with serialization lock.
+
+    Runs blocking pyperclip/pyautogui calls in a thread pool so the aiortc
+    event loop is free during the paste (pyperclip + hotkey can block 50-200ms
+    on Windows). Saves and restores the previous clipboard content so the user's
+    PC clipboard isn't silently clobbered by dictated text.
+    """
+    async with _get_clipboard_lock():
+        previous = await asyncio.to_thread(pyperclip.paste)
+        await asyncio.to_thread(type_text_paste, text)
+        # 100ms: give the OS time to process Ctrl+V before we overwrite the clipboard
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(pyperclip.copy, previous)
+
+
+async def get_clipboard_async() -> str:
+    """Read PC clipboard with serialization lock.
+
+    Runs in a thread pool to avoid blocking the aiortc event loop during
+    the OS clipboard read (pyperclip.paste() can block on slow systems).
+    """
+    async with _get_clipboard_lock():
+        return await asyncio.to_thread(pyperclip.paste)
 
 # Disable fail-safe — tapping the extreme edge of the phone screen sends (0,0)
 # which triggers FailSafeException and crashes the host.

@@ -6,6 +6,7 @@ import { useSessionStore, awaitClipboard } from "@/hooks/use-session";
 import { useGestures } from "@/hooks/use-gestures";
 import type { Rect } from "@/hooks/use-gestures";
 import { CommsButton } from "@/components/comms-button";
+import { KeyboardOverlay } from "@/components/keyboard-overlay";
 import { POCKET_MODE_BG, TOAST_DISMISS_MS } from "@/lib/constants";
 
 export default function SessionPage() {
@@ -37,6 +38,18 @@ export default function SessionPage() {
   // ─── Mode toggle ──────────────────────────────────────────────────────────
 
   const [mode, setMode] = useState<"voice" | "trackpad">("voice");
+
+  // ─── Keyboard overlay ─────────────────────────────────────────────────────
+
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const keyboardTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Synchronous focus BEFORE state update — satisfies iOS user-gesture requirement.
+  // The textarea is always mounted (just hidden via CSS), so the ref is always valid.
+  const openKeyboard = () => {
+    keyboardTextareaRef.current?.focus({ preventScroll: true });
+    setIsKeyboardOpen(true);
+  };
 
   // ─── Trackpad & Scroll rects ──────────────────────────────────────────────
 
@@ -106,25 +119,29 @@ export default function SessionPage() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
   };
 
-  /** 100% synchronous — no awaits. Safari-safe. */
+  /** Synchronous-first copy. Safari-safe. */
   const handleCopy = () => {
     if (!fetchedText) {
       dismissToast();
       return;
     }
 
+    // execCommand is synchronous and needs no permissions dialog — run it first
+    // so the copy is guaranteed even if the async clipboard API is unavailable.
     try {
-      navigator.clipboard.writeText(fetchedText);
-    } catch {
       const ta = document.createElement("textarea");
       ta.value = fetchedText;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
+      ta.style.cssText = "position:fixed;left:-9999px;opacity:0";
       document.body.appendChild(ta);
       ta.select();
       document.execCommand("copy");
       document.body.removeChild(ta);
-    }
+    } catch { /* silent — browser may have removed execCommand */ }
+
+    // Best-effort: also write via modern clipboard API. The .catch() is required —
+    // writeText() returns a Promise; without it, a permission denial is an unhandled
+    // rejection that silently bypasses the execCommand fallback above.
+    navigator.clipboard?.writeText(fetchedText).catch(() => {});
 
     // Stash text, snap back to voice — pill activates automatically
     setCopiedText(fetchedText);
@@ -209,9 +226,17 @@ export default function SessionPage() {
   useEffect(() => {
     if (!isPocketMode) return;
     let wakeLock: WakeLockSentinel | null = null;
-    navigator.wakeLock?.request("screen").then((wl) => { wakeLock = wl; }).catch(() => {});
+    // ?.then() — if wakeLock is undefined (Firefox / older iOS), optional chaining
+    // short-circuits to undefined; without ?.then() it throws TypeError on .then().
+    navigator.wakeLock?.request("screen")?.then((wl) => { wakeLock = wl; })?.catch(() => {});
     return () => { wakeLock?.release().catch(() => {}); };
   }, [isPocketMode]);
+
+  // ─── Settings modal ───────────────────────────────────────────────────────
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const modalTouchStartY = useRef(0);
+  const modalDidScroll = useRef(false);
 
   const statusLabel =
     transportStatus === "signaling"
@@ -247,27 +272,29 @@ export default function SessionPage() {
         />
       </div>
 
-      {/* ── Mode toggle pill — top-left ────────────────────────────────────── */}
-      <div className="absolute top-4 left-4 z-20 flex rounded-full bg-zinc-800/80 backdrop-blur p-1">
-        <button
-          type="button"
-          onClick={() => setMode("voice")}
-          className={`rounded-full px-4 py-1.5 text-sm transition-colors ${
-            mode === "voice" ? "bg-white text-black font-medium" : "text-white/60"
-          }`}
-        >
-          👂
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode("trackpad")}
-          className={`rounded-full px-4 py-1.5 text-sm transition-colors ${
-            mode === "trackpad" ? "bg-white text-black font-medium" : "text-white/60"
-          }`}
-        >
-          🖱️
-        </button>
-      </div>
+      {/* ── Mode toggle pill — portrait only (landscape embeds it in left column) */}
+      {!isLandscape && (
+        <div className="absolute top-4 left-4 z-20 flex rounded-full bg-zinc-800/80 backdrop-blur p-1">
+          <button
+            type="button"
+            onClick={() => setMode("voice")}
+            className={`rounded-full px-4 py-1.5 text-sm transition-colors ${
+              mode === "voice" ? "bg-white text-black font-medium" : "text-white/60"
+            }`}
+          >
+            👂
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("trackpad")}
+            className={`rounded-full px-4 py-1.5 text-sm transition-colors ${
+              mode === "trackpad" ? "bg-white text-black font-medium" : "text-white/60"
+            }`}
+          >
+            🖱️
+          </button>
+        </div>
+      )}
 
       {/* ── Zoom indicator — portrait only, landscape has no space ─────────── */}
       {zoomPercent > 0 && !isLandscape && (
@@ -283,60 +310,157 @@ export default function SessionPage() {
         </div>
       )}
 
-      {/* ── Controls (Pocket + Disconnect) — orientation-aware ─────────────── */}
-      {isLandscape ? (
-        // Landscape: stack vertically on the left, below mode toggle
-        <div className="absolute top-16 left-4 z-20 flex flex-col gap-2">
-          <button
-            onClick={togglePocketMode}
-            className="rounded-full bg-zinc-800/80 px-4 py-2 text-sm text-white backdrop-blur"
-            type="button"
+      {/* ── Gear (+ mode toggle + paste in landscape) ──────────────────────── */}
+      {/* Portrait: gear + paste row, top-right. Landscape: full left column, top-left. */}
+      <div
+        className={`absolute z-20 flex gap-2 ${
+          isLandscape ? "top-4 left-4 flex-col items-start" : "top-4 right-4 flex-row items-center"
+        }`}
+      >
+        {/* Settings gear */}
+        <button
+          type="button"
+          onClick={() => setSettingsOpen(true)}
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-800/80 text-white backdrop-blur active:scale-90 transition-transform"
+          aria-label="Settings"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        {/* Mode toggle — landscape only (portrait renders it separately top-left) */}
+        {isLandscape && (
+          <div className="flex rounded-full bg-zinc-800/80 backdrop-blur p-1">
+            <button
+              type="button"
+              onClick={() => setMode("voice")}
+              className={`rounded-full px-4 py-1.5 text-sm transition-colors ${
+                mode === "voice" ? "bg-white text-black font-medium" : "text-white/60"
+              }`}
+            >
+              👂
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("trackpad")}
+              className={`rounded-full px-4 py-1.5 text-sm transition-colors ${
+                mode === "trackpad" ? "bg-white text-black font-medium" : "text-white/60"
+              }`}
+            >
+              🖱️
+            </button>
+          </div>
+        )}
+        {/* Paste pill — always-on: pastes phone clipboard or in-app copied text */}
+        <button
+          type="button"
+          onClick={handlePaste}
+          onTouchEnd={(e) => { e.stopPropagation(); handlePaste(); }}
+          className="rounded-full px-4 py-2 text-sm font-semibold bg-white text-black transition-all duration-200 active:scale-95"
+        >
+          Paste
+        </button>
+        {/* Keyboard toggle */}
+        <button
+          type="button"
+          onClick={openKeyboard}
+          onTouchEnd={(e) => { e.stopPropagation(); openKeyboard(); }}
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-800/80 text-white backdrop-blur active:scale-90 transition-transform"
+          aria-label="Open keyboard"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="6" width="20" height="12" rx="2"/>
+            <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>
+          </svg>
+        </button>
+      </div>
+
+      {/* ── Settings modal ──────────────────────────────────────────────────── */}
+      {settingsOpen && (
+        <div
+          className="fixed inset-0 z-[9998] flex items-center justify-center"
+          style={{ backdropFilter: "blur(12px)", backgroundColor: "rgba(0,0,0,0.6)", touchAction: "none" }}
+          onClick={() => setSettingsOpen(false)}
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => { e.stopPropagation(); setSettingsOpen(false); }}
+        >
+          <div
+            className="relative w-[min(360px,88vw)] max-h-[calc(100dvh-3rem)] flex flex-col rounded-3xl bg-zinc-900/90 shadow-2xl border border-white/10 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
           >
-            Pocket
-          </button>
-          <button
-            onClick={handleDisconnect}
-            className="rounded-full bg-red-600/80 px-4 py-2 text-sm text-white backdrop-blur"
-            type="button"
-          >
-            Disconnect
-          </button>
-          {/* Paste pill — permanent active color (always ready for on-demand clipboard injection) */}
-          <button
-            type="button"
-            onClick={handlePaste}
-            onTouchEnd={(e) => { e.stopPropagation(); handlePaste(); }}
-            className="rounded-full px-4 py-2 text-sm font-semibold bg-white text-black transition-all duration-200 active:scale-95"
-          >
-            Paste
-          </button>
-        </div>
-      ) : (
-        // Portrait: top-right, stacked vertically
-        <div className="absolute top-4 right-4 z-20 flex flex-col gap-2">
-          <button
-            onClick={togglePocketMode}
-            className="rounded-full bg-zinc-800/80 px-4 py-2 text-sm text-white backdrop-blur"
-            type="button"
-          >
-            Pocket
-          </button>
-          <button
-            onClick={handleDisconnect}
-            className="rounded-full bg-red-600/80 px-4 py-2 text-sm text-white backdrop-blur"
-            type="button"
-          >
-            Disconnect
-          </button>
-          {/* Paste pill — permanent active color (always ready for on-demand clipboard injection) */}
-          <button
-            type="button"
-            onClick={handlePaste}
-            onTouchEnd={(e) => { e.stopPropagation(); handlePaste(); }}
-            className="rounded-full px-4 py-2 text-sm font-semibold bg-white text-black transition-all duration-200 active:scale-95"
-          >
-            Paste
-          </button>
+            {/* Header — sticky, never scrolls away */}
+            <div className="flex-shrink-0 flex items-center justify-between px-6 pt-6 pb-4 border-b border-white/10">
+              <h2 className="text-base font-semibold text-white">Settings</h2>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                onTouchEnd={(e) => { e.stopPropagation(); setSettingsOpen(false); }}
+                className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-white/60 active:scale-90 transition-transform"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+              </button>
+            </div>
+
+            {/* Scrollable body — tracks touch movement to distinguish scroll from tap */}
+            <div
+              className="flex-1 overflow-y-auto overscroll-contain px-6 py-5 flex flex-col gap-4"
+              onTouchStart={(e) => { e.stopPropagation(); modalTouchStartY.current = e.touches[0].clientY; modalDidScroll.current = false; }}
+              onTouchMove={(e) => { e.stopPropagation(); if (Math.abs(e.touches[0].clientY - modalTouchStartY.current) > 6) modalDidScroll.current = true; }}
+            >
+              {/* Account placeholder */}
+              <div className="rounded-2xl bg-white/5 px-4 py-3">
+                <p className="text-xs text-white/40 uppercase tracking-wider mb-1">Account</p>
+                <p className="text-sm text-white/50">Google Sign-In — coming soon</p>
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setSettingsOpen(false); togglePocketMode(); }}
+                  onTouchEnd={(e) => { e.stopPropagation(); if (!modalDidScroll.current) { setSettingsOpen(false); togglePocketMode(); } }}
+                  className="w-full rounded-2xl bg-white/10 px-4 py-3 text-left text-sm text-white active:bg-white/20 transition-colors"
+                >
+                  <span className="font-medium">Pocket Mode</span>
+                  <span className="ml-2 text-white/40">Blackout screen, keep mic hot</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setSettingsOpen(false); handleDisconnect(); }}
+                  onTouchEnd={(e) => { e.stopPropagation(); if (!modalDidScroll.current) { setSettingsOpen(false); handleDisconnect(); } }}
+                  className="w-full rounded-2xl bg-red-600/20 px-4 py-3 text-left text-sm text-red-400 active:bg-red-600/40 transition-colors border border-red-600/30"
+                >
+                  <span className="font-medium">Disconnect</span>
+                </button>
+              </div>
+
+              {/* Cheat sheet */}
+              <div className="rounded-2xl bg-white/5 px-4 py-3">
+                <p className="text-xs text-white/40 uppercase tracking-wider mb-3">Gestures & Commands</p>
+                <div className="flex flex-col gap-2.5">
+                  {[
+                    { label: "Zoom", hint: "Hold (in) · Pinch (out)" },
+                    { label: "Trackpad", hint: "Double-tap select · Hold & drag highlight" },
+                    { label: "Keyboard", hint: "⌨ button — type or paste to PC" },
+                    { label: "Dictate", hint: "Double-tap comms button" },
+                    { label: "Commands", hint: "Hold comms · tap a slice" },
+                  ].map(({ label, hint }) => (
+                    <div key={label} className="flex items-baseline gap-2">
+                      <span className="min-w-[76px] text-xs font-semibold text-white/70">{label}</span>
+                      <span className="text-xs text-white/40">{hint}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -486,6 +610,16 @@ export default function SessionPage() {
         );
       })()}
 
+      {/* ── Keyboard overlay — always mounted, hidden via CSS when closed ────── */}
+      <KeyboardOverlay
+        isOpen={isKeyboardOpen}
+        isLandscape={isLandscape}
+        textareaRef={keyboardTextareaRef}
+        onClose={() => setIsKeyboardOpen(false)}
+        sendCommand={sendCommand}
+        isConnected={transportStatus === "connected"}
+      />
+
       {/* ── Comms Button — voice mode only ─────────────────────────────────── */}
       {mode === "voice" && (
         <CommsButton
@@ -537,13 +671,10 @@ export default function SessionPage() {
               <button
                 className="rounded-full bg-zinc-800/80 px-6 py-3 text-sm text-white backdrop-blur pointer-events-auto"
                 type="button"
+                onTouchStart={(e) => { e.stopPropagation(); e.preventDefault(); }}
                 onTouchEnd={(e) => {
                   e.stopPropagation();
-                  setPocketButtonVisible(false);
-                  togglePocketMode();
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
+                  e.preventDefault(); // blocks synthetic click from reaching layer underneath
                   setPocketButtonVisible(false);
                   togglePocketMode();
                 }}
