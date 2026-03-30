@@ -23,7 +23,14 @@ export async function POST() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://voicers.vercel.app";
+  // IMPORTANT: On Vercel, set NEXT_PUBLIC_SITE_URL=https://voicers.vercel.app
+  // If this env var is missing or still set to localhost the magic link will be broken.
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL ?? "https://voicers.vercel.app")
+    .replace(/^http:\/\/localhost(:\d+)?/, "https://voicers.vercel.app");
+
+  if (process.env.NODE_ENV === "production" && siteUrl.includes("localhost")) {
+    console.error("send-verify-email: siteUrl resolved to localhost in production — check NEXT_PUBLIC_SITE_URL env var on Vercel");
+  }
 
   const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
     type: "magiclink",

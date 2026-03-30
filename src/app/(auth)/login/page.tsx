@@ -15,6 +15,8 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>("auth");
+  const [copied, setCopied] = useState(false);
+  const [resendStatus, setResendStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [verifyUrl, setVerifyUrl] = useState("https://voicers.vercel.app/verify");
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
@@ -197,14 +199,24 @@ export default function LoginPage() {
                 {verifyUrl.replace("https://", "")}
               </span>
               <button
-                onClick={() => navigator.clipboard.writeText(verifyUrl)}
-                className="shrink-0 text-zinc-500 hover:text-zinc-300"
+                onClick={() => {
+                  navigator.clipboard.writeText(verifyUrl);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }}
+                className={`shrink-0 transition-colors ${copied ? "text-green-400" : "text-zinc-500 hover:text-zinc-300"}`}
                 title="Copy full URL"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                </svg>
+                {copied ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                )}
               </button>
             </div>
           </div>
@@ -212,6 +224,28 @@ export default function LoginPage() {
           <p className="animate-pulse text-center text-xs text-zinc-600">
             Waiting for the other device to connect…
           </p>
+
+          {isEmailPath && (
+            <button
+              onClick={async () => {
+                setResendStatus("sending");
+                try {
+                  const res = await fetch("/api/send-verify-email", { method: "POST" });
+                  setResendStatus(res.ok ? "sent" : "error");
+                } catch {
+                  setResendStatus("error");
+                }
+                setTimeout(() => setResendStatus("idle"), 4000);
+              }}
+              disabled={resendStatus === "sending"}
+              className="text-xs text-zinc-600 hover:text-zinc-400 disabled:opacity-50 transition-colors"
+            >
+              {resendStatus === "sending" && "Sending…"}
+              {resendStatus === "sent" && <span className="text-green-500">Email sent ✓</span>}
+              {resendStatus === "error" && <span className="text-red-400">Failed — try again</span>}
+              {resendStatus === "idle" && "Didn't get the email? Resend"}
+            </button>
+          )}
         </div>
       </main>
     );

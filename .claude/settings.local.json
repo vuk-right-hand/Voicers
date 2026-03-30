@@ -17,7 +17,16 @@
       "Bash(venv/Scripts/python -c \":*)",
       "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/session/)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(find /c/Antigravity/Voicer/supabase -type f \\\\\\(-name *.sql -o -name *.ts \\\\\\))",
+      "Bash(find /c/Antigravity/Voicer -maxdepth 3 -type f \\\\\\(-name *.md -o -name schema* -o -name database* \\\\\\))",
+      "Bash(xargs grep:*)",
+      "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(auth\\\\\\)/)",
+      "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/)",
+      "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/dashboard/)",
+      "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/settings/)",
+      "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/layout.tsx)",
+      "Bash(cat /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/layout.tsx)"
     ]
   }
 }
