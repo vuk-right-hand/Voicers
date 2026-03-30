@@ -36,7 +36,7 @@ export async function POST() {
     type: "magiclink",
     email: user.email,
     options: {
-      redirectTo: `${siteUrl}/auth/callback`,
+      redirectTo: `${siteUrl}/callback`,
     },
   });
 
