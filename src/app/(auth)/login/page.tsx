@@ -199,12 +199,15 @@ export default function LoginPage() {
   // ─── Realtime listener ───────────────────────────────────────────────────────
 
   const setupRealtimeListener = (supabase: SupabaseClient, userId: string) => {
-    // Unsubscribe any existing channel before creating a new one (#5)
+    // Unsubscribe any existing channel before creating a new one
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
     }
 
+    const redirectToDashboard = () => window.location.replace("/dashboard");
+
+    // ── Primary: Realtime postgres_changes ────────────────────────────────
     const channel = supabase
       .channel(`device-link-${userId}`)
       .on(
@@ -217,13 +220,26 @@ export default function LoginPage() {
         },
         (payload) => {
           if ((payload.new as { device_b_linked_at?: string }).device_b_linked_at) {
-            window.location.replace("/dashboard");
+            redirectToDashboard();
           }
         }
       )
       .subscribe();
 
     channelRef.current = channel;
+
+    // ── Fallback: poll every 3s in case Realtime event was missed ─────────
+    // This handles backgrounded tabs, network blips and Realtime cold-start delays.
+    const pollInterval = setInterval(async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user?.user_metadata?.device_b_linked_at) {
+        clearInterval(pollInterval);
+        redirectToDashboard();
+      }
+    }, 3000);
+
+    // Store cleanup on the channel ref so the component can clear it too
+    (channel as any)._pollInterval = pollInterval;
   };
 
   // ─── Render: Device B linking screen ─────────────────────────────────────────
