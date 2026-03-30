@@ -229,16 +229,51 @@ export default function SessionPage() {
     }
   }, [isPocketMode]);
 
-  // ─── WakeLock — hold screen on in pocket mode ─────────────────────────────
+  // ─── WakeLock — hold screen on while connected ────────────────────────────
 
   useEffect(() => {
-    if (!isPocketMode) return;
-    let wakeLock: WakeLockSentinel | null = null;
-    // ?.then() — if wakeLock is undefined (Firefox / older iOS), optional chaining
-    // short-circuits to undefined; without ?.then() it throws TypeError on .then().
-    navigator.wakeLock?.request("screen")?.then((wl) => { wakeLock = wl; })?.catch(() => {});
-    return () => { wakeLock?.release().catch(() => {}); };
-  }, [isPocketMode]);
+    let wakeLock: any = null;
+    const isConnected = transportStatus === "connected";
+
+    // Need to cast to any internally to soothe TS if WakeLock isn't fully supported
+    const nav = navigator as any;
+
+    const requestWakeLock = async () => {
+      if ("wakeLock" in navigator && isConnected) {
+        try {
+          wakeLock = await nav.wakeLock.request("screen");
+          wakeLock?.addEventListener("release", () => {
+            // OS released it (e.g., app minimized)
+          });
+        } catch (err) {
+          // blocked by device state (low battery) or permissions
+        }
+      }
+    };
+
+    if (isConnected) {
+      requestWakeLock();
+    } else if (wakeLock) {
+      wakeLock.release().then(() => {
+        wakeLock = null;
+      }).catch(() => {});
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && isConnected) {
+        requestWakeLock();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (wakeLock) {
+        wakeLock.release().catch(() => {});
+      }
+    };
+  }, [transportStatus]);
 
   // ─── Settings modal ───────────────────────────────────────────────────────
 
