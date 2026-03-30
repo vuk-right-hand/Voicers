@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
 
-type Screen = "auth" | "waiting";
+type Screen = "auth" | "waiting" | "linking";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -18,39 +18,48 @@ export default function LoginPage() {
   const [copied, setCopied] = useState(false);
   const [resendStatus, setResendStatus] = useState<string>("idle");
   const [verifyUrl, setVerifyUrl] = useState("https://voicers.vercel.app/verify");
+  const [linkDebug, setLinkDebug] = useState<string>(""); // temporary debug output
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
-  // On mount: use onAuthStateChange so we wait for the Supabase client to
-  // fully consume any #access_token hash fragment before we act.
-  // getSession() has a race condition — it returns null if the client hasn't
-  // finished parsing the implicit-flow hash yet (which is how Device B arrives).
   useEffect(() => {
     const supabase = createClient();
     supabaseRef.current = supabase;
 
-    // admin.generateLink() produces an implicit flow link that lands here with
-    // #access_token=...&type=magiclink in the URL hash. Server routes can't
-    // read hash fragments, which is why we redirect to /login (client page).
     const hash = window.location.hash;
     const isImplicitDeviceB =
       hash.includes("access_token") && hash.includes("type=magiclink");
 
-    let handled = false;
+    // ─── DEVICE B: explicit hash parsing ──────────────────────────────────
+    // admin.generateLink() produces an implicit-flow link. Supabase redirects
+    // to /login#access_token=...&refresh_token=...&type=magiclink
+    // We parse the tokens ourselves and force-set the session — no race conditions.
+    if (isImplicitDeviceB) {
+      setScreen("linking");
+      setLinkDebug("Detected magic link hash. Parsing tokens…");
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        // Only act once, and only on meaningful events
-        if (handled) return;
-        if (event !== "INITIAL_SESSION" && event !== "SIGNED_IN") return;
-        if (!session) return;
+      const params = new URLSearchParams(hash.substring(1)); // strip leading #
+      const accessToken = params.get("access_token");
+      const refreshToken = params.get("refresh_token");
 
-        handled = true;
+      if (!accessToken || !refreshToken) {
+        setLinkDebug(`Missing tokens. access=${!!accessToken} refresh=${!!refreshToken}. Hash: ${hash.substring(0, 80)}`);
+        return;
+      }
 
-        if (isImplicitDeviceB) {
-          // We are Device B arriving from the Resend magic-link email.
-          // Stamp the database so Device A's Realtime listener picks it up.
+      setLinkDebug("Tokens found. Calling setSession…");
+
+      supabase.auth
+        .setSession({ access_token: accessToken, refresh_token: refreshToken })
+        .then(async ({ data: { session }, error: sessionError }) => {
+          if (sessionError || !session) {
+            setLinkDebug(`setSession failed: ${sessionError?.message ?? "no session returned"}`);
+            return;
+          }
+
+          setLinkDebug(`Session OK (${session.user.email}). Stamping device_b…`);
+
           const linkedAt = new Date().toISOString();
           await Promise.all([
             supabase
@@ -61,23 +70,43 @@ export default function LoginPage() {
               data: { device_b_linked_at: linkedAt },
             }),
           ]);
-          window.location.replace("/dashboard");
-          return;
-        }
 
-        // Already linked (returning user) → dashboard
-        if (session.user.user_metadata?.device_b_linked_at) {
+          setLinkDebug("Stamped! Redirecting to dashboard…");
           window.location.replace("/dashboard");
-          return;
-        }
+        })
+        .catch((err) => {
+          setLinkDebug(`Caught error: ${err?.message ?? err}`);
+        });
 
-        // Session exists but Device B not linked yet → restore waiting room
-        const provider = session.user.app_metadata?.provider ?? "email";
-        setVerifyUrl(buildVerifyUrl(provider, session.user.email));
-        setScreen("waiting");
-        setupRealtimeListener(supabase, session.user.id);
+      // Clean the hash from the URL bar (cosmetic)
+      window.history.replaceState(null, "", window.location.pathname);
+      return; // skip regular flow & cleanup — no subscription to unsubscribe
+    }
+
+    // ─── DEVICE A: regular session detection ──────────────────────────────
+    let handled = false;
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (handled) return;
+      if (event !== "INITIAL_SESSION" && event !== "SIGNED_IN") return;
+      if (!session) return;
+
+      handled = true;
+
+      // Already linked → dashboard
+      if (session.user.user_metadata?.device_b_linked_at) {
+        window.location.replace("/dashboard");
+        return;
       }
-    );
+
+      // Unlinked session → waiting room
+      const provider = session.user.app_metadata?.provider ?? "email";
+      setVerifyUrl(buildVerifyUrl(provider, session.user.email));
+      setScreen("waiting");
+      setupRealtimeListener(supabase, session.user.id);
+    });
 
     return () => subscription.unsubscribe();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -196,6 +225,23 @@ export default function LoginPage() {
 
     channelRef.current = channel;
   };
+
+  // ─── Render: Device B linking screen ─────────────────────────────────────────
+
+  if (screen === "linking") {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-black p-6 text-white">
+        <h1 className="text-3xl font-bold">Voicer</h1>
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          <p className="text-zinc-400">Connecting your device…</p>
+          {linkDebug && (
+            <p className="max-w-xs break-all text-xs text-zinc-600 font-mono">{linkDebug}</p>
+          )}
+        </div>
+      </main>
+    );
+  }
 
   // ─── Render: PKCE waiting room ───────────────────────────────────────────────
 
