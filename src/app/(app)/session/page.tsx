@@ -42,6 +42,14 @@ export default function SessionPage() {
   // ─── Keyboard overlay ─────────────────────────────────────────────────────
 
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  
+  // Auto-close keyboard when flipping to landscape
+  useEffect(() => {
+    if (isLandscape && isKeyboardOpen) {
+      setIsKeyboardOpen(false);
+    }
+  }, [isLandscape, isKeyboardOpen]);
+
   const keyboardTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Synchronous focus BEFORE state update — satisfies iOS user-gesture requirement.
@@ -361,19 +369,21 @@ export default function SessionPage() {
         >
           Paste
         </button>
-        {/* Keyboard toggle */}
-        <button
-          type="button"
-          onClick={openKeyboard}
-          onTouchEnd={(e) => { e.stopPropagation(); openKeyboard(); }}
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-800/80 text-white backdrop-blur active:scale-90 transition-transform"
-          aria-label="Open keyboard"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="2" y="6" width="20" height="12" rx="2"/>
-            <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>
-          </svg>
-        </button>
+        {/* Keyboard toggle - disabled in landscape per user request */}
+        {!isLandscape && (
+          <button
+            type="button"
+            onClick={openKeyboard}
+            onTouchEnd={(e) => { e.stopPropagation(); openKeyboard(); }}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-800/80 text-white backdrop-blur active:scale-90 transition-transform"
+            aria-label="Open keyboard"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="6" width="20" height="12" rx="2"/>
+              <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* ── Settings modal ──────────────────────────────────────────────────── */}
