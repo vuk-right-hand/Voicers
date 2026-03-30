@@ -16,7 +16,7 @@ export default function LoginPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>("auth");
   const [copied, setCopied] = useState(false);
-  const [resendStatus, setResendStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [resendStatus, setResendStatus] = useState<string>("idle");
   const [verifyUrl, setVerifyUrl] = useState("https://voicers.vercel.app/verify");
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
@@ -231,9 +231,14 @@ export default function LoginPage() {
                 setResendStatus("sending");
                 try {
                   const res = await fetch("/api/send-verify-email", { method: "POST" });
-                  setResendStatus(res.ok ? "sent" : "error");
-                } catch {
-                  setResendStatus("error");
+                  if (!res.ok) {
+                    const text = await res.text();
+                    setResendStatus(`error: ${text || "Unknown"}`);
+                  } else {
+                    setResendStatus("sent");
+                  }
+                } catch (e: any) {
+                  setResendStatus(`error: Network fail`);
                 }
                 setTimeout(() => setResendStatus("idle"), 4000);
               }}
@@ -242,7 +247,7 @@ export default function LoginPage() {
             >
               {resendStatus === "sending" && "Sending…"}
               {resendStatus === "sent" && <span className="text-green-500">Email sent ✓</span>}
-              {resendStatus === "error" && <span className="text-red-400">Failed — try again</span>}
+              {resendStatus.startsWith("error") && <span className="text-red-400">Failed: {resendStatus.replace("error: ", "")}</span>}
               {resendStatus === "idle" && "Didn't get the email? Resend"}
             </button>
           )}
