@@ -22,41 +22,64 @@ export default function LoginPage() {
   const supabaseRef = useRef<SupabaseClient | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
-  // On mount: if a session already exists, branch immediately —
-  // linked → dashboard, unlinked → restore PKCE waiting room
+  // On mount: use onAuthStateChange so we wait for the Supabase client to
+  // fully consume any #access_token hash fragment before we act.
+  // getSession() has a race condition — it returns null if the client hasn't
+  // finished parsing the implicit-flow hash yet (which is how Device B arrives).
   useEffect(() => {
     const supabase = createClient();
     supabaseRef.current = supabase;
-    
-    // admin.generateLink() bypasses server /callback and hits client directly via hash `#access_token=...`
-    // We must detect this implicit flow so Device B doesn't act like Device A and trigger a loop!
-    const isImplicitDeviceB = window.location.hash.includes("access_token") || window.location.hash.includes("type=magiclink");
 
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (!session) return;
+    // admin.generateLink() produces an implicit flow link that lands here with
+    // #access_token=...&type=magiclink in the URL hash. Server routes can't
+    // read hash fragments, which is why we redirect to /login (client page).
+    const hash = window.location.hash;
+    const isImplicitDeviceB =
+      hash.includes("access_token") && hash.includes("type=magiclink");
 
-      if (isImplicitDeviceB) {
-        // We are Device B! Stamp the database right now.
-        const linkedAt = new Date().toISOString();
-        await Promise.all([
-          supabase.from("profiles").update({ device_b_linked_at: linkedAt }).eq("id", session.user.id),
-          supabase.auth.updateUser({ data: { device_b_linked_at: linkedAt } })
-        ]);
-        window.location.replace("/dashboard");
-        return;
+    let handled = false;
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        // Only act once, and only on meaningful events
+        if (handled) return;
+        if (event !== "INITIAL_SESSION" && event !== "SIGNED_IN") return;
+        if (!session) return;
+
+        handled = true;
+
+        if (isImplicitDeviceB) {
+          // We are Device B arriving from the Resend magic-link email.
+          // Stamp the database so Device A's Realtime listener picks it up.
+          const linkedAt = new Date().toISOString();
+          await Promise.all([
+            supabase
+              .from("profiles")
+              .update({ device_b_linked_at: linkedAt })
+              .eq("id", session.user.id),
+            supabase.auth.updateUser({
+              data: { device_b_linked_at: linkedAt },
+            }),
+          ]);
+          window.location.replace("/dashboard");
+          return;
+        }
+
+        // Already linked (returning user) → dashboard
+        if (session.user.user_metadata?.device_b_linked_at) {
+          window.location.replace("/dashboard");
+          return;
+        }
+
+        // Session exists but Device B not linked yet → restore waiting room
+        const provider = session.user.app_metadata?.provider ?? "email";
+        setVerifyUrl(buildVerifyUrl(provider, session.user.email));
+        setScreen("waiting");
+        setupRealtimeListener(supabase, session.user.id);
       }
+    );
 
-      if (session.user.user_metadata?.device_b_linked_at) {
-        window.location.replace("/dashboard");
-        return;
-      }
-      
-      // Session exists but Device B not linked yet — restore waiting room
-      const provider = session.user.app_metadata?.provider ?? "email";
-      setVerifyUrl(buildVerifyUrl(provider, session.user.email));
-      setScreen("waiting");
-      setupRealtimeListener(supabase, session.user.id);
-    });
+    return () => subscription.unsubscribe();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
