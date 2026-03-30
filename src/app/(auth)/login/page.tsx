@@ -27,12 +27,30 @@ export default function LoginPage() {
   useEffect(() => {
     const supabase = createClient();
     supabaseRef.current = supabase;
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    
+    // admin.generateLink() bypasses server /callback and hits client directly via hash `#access_token=...`
+    // We must detect this implicit flow so Device B doesn't act like Device A and trigger a loop!
+    const isImplicitDeviceB = window.location.hash.includes("access_token") || window.location.hash.includes("type=magiclink");
+
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (!session) return;
+
+      if (isImplicitDeviceB) {
+        // We are Device B! Stamp the database right now.
+        const linkedAt = new Date().toISOString();
+        await Promise.all([
+          supabase.from("profiles").update({ device_b_linked_at: linkedAt }).eq("id", session.user.id),
+          supabase.auth.updateUser({ data: { device_b_linked_at: linkedAt } })
+        ]);
+        window.location.replace("/dashboard");
+        return;
+      }
+
       if (session.user.user_metadata?.device_b_linked_at) {
         window.location.replace("/dashboard");
         return;
       }
+      
       // Session exists but Device B not linked yet — restore waiting room
       const provider = session.user.app_metadata?.provider ?? "email";
       setVerifyUrl(buildVerifyUrl(provider, session.user.email));
