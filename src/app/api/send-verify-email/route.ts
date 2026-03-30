@@ -42,7 +42,7 @@ export async function POST() {
 
   if (linkError || !linkData.properties?.action_link) {
     console.error("generateLink error:", linkError);
-    return NextResponse.json({ error: "Failed to generate connection link" }, { status: 500 });
+    return NextResponse.json({ error: `Supabase Generate Link Error: ${(linkError as any)?.message || 'Unknown'}` }, { status: 500 });
   }
 
   const magicLink = linkData.properties.action_link;
@@ -107,7 +107,7 @@ export async function POST() {
   if (!res.ok) {
     const body = await res.text();
     console.error("Resend error:", body);
-    return NextResponse.json({ error: "Failed to send email" }, { status: 500 });
+    return NextResponse.json({ error: `Resend API Error: ${body}` }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });
