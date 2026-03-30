@@ -6,92 +6,111 @@ import type { PhoneCommand } from "@/types";
 interface KeyboardOverlayProps {
   isOpen: boolean;
   isLandscape: boolean;
-  /** Ref owned by the parent — focus() is called synchronously in the toggle button's
-   *  onClick handler BEFORE setIsKeyboardOpen(true) to bypass iOS async-focus block. */
+  /** No longer used for real focusing, kept for compat/ref */
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onClose: () => void;
   sendCommand: (cmd: PhoneCommand) => void;
   isConnected: boolean;
 }
 
+const ROWS = [
+  ["Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "Bksp"],
+  ["Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "-", "="],
+  ["Caps", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "Enter"],
+  ["Shift", "z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "Up"],
+  ["Ctrl", "Cmd", "Alt", "Space", "Left", "Down", "Right"]
+];
+
 export function KeyboardOverlay({
   isOpen,
   isLandscape,
-  textareaRef,
   onClose,
   sendCommand,
   isConnected,
 }: KeyboardOverlayProps) {
-  const [text, setText] = useState("");
-
-  // visualViewport tracks the region NOT covered by the native keyboard.
-  // keyboardHeight = how far to push the panel up from the bottom.
-  // availableHeight = height of the visible region above the native keyboard.
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-  const [availableHeight, setAvailableHeight] = useState(
-    typeof window !== "undefined" ? window.innerHeight : 812,
-  );
+  const [activeModifiers, setActiveModifiers] = useState<Set<string>>(new Set());
+  const [capsLock, setCapsLock] = useState(false);
+  const [shift, setShift] = useState(false);
 
   // Landscape panel drag (position) and resize (width)
-  const [panelWidth, setPanelWidth] = useState(280);
+  const [panelWidth, setPanelWidth] = useState(400); // Ticking up slightly to fit keys
   const [panelRight, setPanelRight] = useState(0);
   const dragStartX = useRef(0);
   const dragStartRight = useRef(0);
   const resizeStartX = useRef(0);
-  const resizeStartWidth = useRef(280);
+  const resizeStartWidth = useRef(400);
 
-  // ── visualViewport listener ─────────────────────────────────────────────────
-  // Keeps the overlay pinned above the native keyboard as it rises/falls.
+  // Clear states when closed
   useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    const update = () => {
-      // keyboard height = layout viewport bottom minus visual viewport bottom
-      const kbH = Math.max(0, window.innerHeight - vv.offsetTop - vv.height);
-      setKeyboardHeight(kbH);
-      setAvailableHeight(vv.height);
-    };
-    vv.addEventListener("resize", update);
-    vv.addEventListener("scroll", update);
-    update();
-    return () => {
-      vv.removeEventListener("resize", update);
-      vv.removeEventListener("scroll", update);
-    };
-  }, []);
-
-  // Clear text when panel closes so next open starts fresh
-  useEffect(() => {
-    if (!isOpen) setText("");
+    if (!isOpen) {
+      setActiveModifiers(new Set());
+      setShift(false);
+    }
   }, [isOpen]);
 
-  const handleSend = useCallback(() => {
-    const trimmed = text.trim();
-    if (!trimmed || !isConnected) return;
-    sendCommand({ type: "type-text", text: trimmed });
-    setText("");
-    onClose();
-  }, [text, isConnected, sendCommand, onClose]);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Plain Enter = newline (multi-line support for code snippets).
-    // Ctrl+Enter or Cmd+Enter = send.
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-      e.preventDefault();
-      handleSend();
-    }
+  const toggleModifier = (mod: string) => {
+    setActiveModifiers(prev => {
+      const next = new Set(prev);
+      if (next.has(mod)) next.delete(mod);
+      else next.add(mod);
+      return next;
+    });
   };
 
-  const handlePaste = async () => {
+  const clearModifiers = () => {
+    setActiveModifiers(new Set());
+    setShift(false);
+  };
+
+  const handleKeyPress = useCallback((key: string, e: React.TouchEvent | React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isConnected) return;
+
+    if (key === "Bksp") {
+      sendCommand({ type: "command", action: "shortcut", payload: { keys: ["backspace"] } });
+    } else if (key === "Enter") {
+      sendCommand({ type: "command", action: "shortcut", payload: { keys: ["enter"] } });
+    } else if (key === "Space") {
+      sendCommand({ type: "type", text: " " });
+    } else if (key === "Tab" || key === "Esc" || key === "Up" || key === "Down" || key === "Left" || key === "Right") {
+      const map: Record<string, string> = { "Esc": "esc", "Up": "up", "Down": "down", "Left": "left", "Right": "right", "Tab": "tab" };
+      sendCommand({ type: "command", action: "shortcut", payload: { keys: [map[key]] } });
+    } else if (key === "Shift") {
+      setShift(s => !s);
+    } else if (key === "Caps") {
+      setCapsLock(c => !c);
+    } else if (["Ctrl", "Alt", "Cmd"].includes(key)) {
+      const map: Record<string, string> = { "Ctrl": "ctrl", "Alt": "alt", "Cmd": "command" };
+      toggleModifier(map[key]);
+    } else {
+      // Normal character
+      const isUpper = capsLock !== shift;
+      const char = isUpper ? key.toUpperCase() : key;
+
+      if (activeModifiers.size > 0) {
+        // e.g., Ctrl + C
+        sendCommand({ type: "command", action: "shortcut", payload: { keys: [...Array.from(activeModifiers), char.toLowerCase()] } });
+        clearModifiers();
+      } else {
+        sendCommand({ type: "type", text: char });
+        setShift(false); // auto-turn off shift
+      }
+    }
+  }, [isConnected, activeModifiers, capsLock, shift, sendCommand]);
+
+  const handlePaste = async (e: React.TouchEvent | React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     try {
       const clip = await navigator.clipboard.readText();
-      if (clip) setText((prev) => prev + clip);
+      if (clip) sendCommand({ type: "type-text", text: clip });
     } catch {
-      // Clipboard read blocked (permission denied or nothing copied) — silent
+      // blocked
     }
   };
 
-  // ── Landscape: drag handle on header bar (move panel left/right) ────────────
+  // ── Landscape: drag handle on header bar ────────────
   const onDragStart = (e: React.TouchEvent) => {
     e.stopPropagation();
     dragStartX.current = e.touches[0].clientX;
@@ -100,13 +119,10 @@ export function KeyboardOverlay({
   const onDragMove = (e: React.TouchEvent) => {
     e.stopPropagation();
     const dx = e.touches[0].clientX - dragStartX.current;
-    // Moving finger left → dx negative → panelRight increases (panel moves left)
-    setPanelRight(
-      Math.max(0, Math.min(window.innerWidth - panelWidth - 20, dragStartRight.current - dx)),
-    );
+    setPanelRight(Math.max(0, Math.min(window.innerWidth - panelWidth - 20, dragStartRight.current - dx)));
   };
 
-  // ── Landscape: resize handle on left edge ───────────────────────────────────
+  // ── Landscape: resize handle on left edge ───────────
   const onResizeStart = (e: React.TouchEvent) => {
     e.stopPropagation();
     resizeStartX.current = e.touches[0].clientX;
@@ -115,10 +131,7 @@ export function KeyboardOverlay({
   const onResizeMove = (e: React.TouchEvent) => {
     e.stopPropagation();
     const dx = e.touches[0].clientX - resizeStartX.current;
-    // Moving finger left → dx negative → panel gets wider
-    setPanelWidth(
-      Math.max(200, Math.min(Math.floor(window.innerWidth * 0.65), resizeStartWidth.current - dx)),
-    );
+    setPanelWidth(Math.max(250, Math.min(Math.floor(window.innerWidth * 0.8), resizeStartWidth.current - dx)));
   };
 
   // ── Panel positioning ───────────────────────────────────────────────────────
@@ -130,7 +143,7 @@ export function KeyboardOverlay({
         top: 0,
         right: panelRight,
         width: panelWidth,
-        height: availableHeight,
+        height: "100%",
         zIndex: 9990,
         borderRadius: "16px 0 0 16px",
         transform: isOpen ? "translate(0)" : slideOut,
@@ -140,8 +153,10 @@ export function KeyboardOverlay({
         position: "fixed",
         left: 0,
         right: 0,
-        bottom: keyboardHeight,
-        height: Math.min(Math.max(Math.floor(availableHeight * 0.45), 180), 320),
+        bottom: 0, // Pinned to real bottom since no native keyboard will push it
+        height: "auto",
+        minHeight: "45vh", // Give it room for the keypad
+        paddingBottom: "max(1rem, env(safe-area-inset-bottom))",
         zIndex: 9990,
         borderRadius: "20px 20px 0 0",
         transform: isOpen ? "translate(0)" : slideOut,
@@ -150,36 +165,14 @@ export function KeyboardOverlay({
 
   return (
     <>
-      {/* Backdrop — portrait only. Covers the video feed to swallow touches and
-          prevent accidental PC taps while the keyboard overlay is open. */}
-      {!isLandscape && (
-        <div
-          className="fixed inset-0 z-[9989]"
-          style={{
-            pointerEvents: isOpen ? "auto" : "none",
-            opacity: isOpen ? 1 : 0,
-            transition: "opacity 250ms ease-out",
-            backgroundColor: "rgba(0,0,0,0.45)",
-          }}
-          onTouchStart={(e) => e.stopPropagation()}
-          onTouchMove={(e) => e.stopPropagation()}
-          onTouchEnd={(e) => { e.stopPropagation(); onClose(); }}
-          onClick={onClose}
-        />
-      )}
-
-      {/* Panel — always mounted so textareaRef is always a valid DOM node.
-          iOS requires a pre-existing focused element; the parent calls
-          textareaRef.current.focus() synchronously in the button's onClick
-          BEFORE calling setIsKeyboardOpen(true). */}
       <div
         className="flex flex-col bg-zinc-900 border border-white/10 shadow-2xl"
         style={panelStyle}
         onTouchStart={(e) => e.stopPropagation()}
         onTouchMove={(e) => e.stopPropagation()}
         onTouchEnd={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
       >
-        {/* ── Landscape: left-edge resize handle ──────────────────────────── */}
         {isLandscape && (
           <div
             className="absolute left-0 top-0 bottom-0 w-5 flex items-center justify-center z-10 touch-none"
@@ -192,89 +185,89 @@ export function KeyboardOverlay({
           </div>
         )}
 
-        {/* ── Header ────────────────────────────────────────────────────────── */}
         <div
-          className="flex-shrink-0 flex items-center gap-3 px-4 pt-3 pb-2"
+          className="flex-shrink-0 flex items-center gap-3 px-4 pt-4 pb-2"
           onTouchStart={isLandscape ? onDragStart : undefined}
           onTouchMove={isLandscape ? onDragMove : undefined}
           onTouchEnd={(e) => e.stopPropagation()}
         >
-          {/* Portrait: center drag pill */}
           {!isLandscape && (
             <div className="absolute top-3 left-1/2 -translate-x-1/2 w-10 h-1 rounded-full bg-white/20" />
           )}
 
-          <span className="text-xs font-semibold text-white/40 tracking-wider select-none">
-            {isLandscape ? "⌨ KEYBOARD — drag header to move" : "⌨ KEYBOARD"}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onTouchEnd={handlePaste}
+              onClick={handlePaste}
+              className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/80 active:bg-white/20"
+            >
+              📋 Paste
+            </button>
+          </div>
+
+          <span className="ml-auto text-xs font-semibold text-white/40 tracking-wider select-none pr-3">
+            HACKER KEYBOARD
           </span>
 
           <button
             type="button"
-            className="ml-auto flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-white/10 text-white/60 active:bg-white/20 transition-colors"
+            className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-white/10 text-white/60 active:bg-white/20 transition-colors"
             onTouchEnd={(e) => { e.stopPropagation(); onClose(); }}
-            onClick={onClose}
-            aria-label="Close keyboard"
+            onClick={(e) => { e.stopPropagation(); onClose(); }}
           >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        {/* ── Textarea ──────────────────────────────────────────────────────── */}
-        {/* MAX_CHARS: WebRTC data channel SCTP limit is typically ~256KB, but
-            the JSON envelope + network stack add overhead. 16 000 chars (~16KB)
-            is a safe ceiling that covers any realistic code snippet. */}
-        <div className="relative flex-1 px-4 pb-1 min-h-0">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type or paste text to send to your PC…"
-            maxLength={16000}
-            className="w-full h-full resize-none rounded-xl bg-white/5 text-white placeholder-white/25 px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-white/20"
-            // 16px is MANDATORY — below this iOS auto-zooms the viewport on focus,
-            // permanently breaking the spatial UI.
-            style={{ fontSize: "16px", lineHeight: "1.5" }}
-            spellCheck={false}
-            autoCorrect="off"
-            autoCapitalize="off"
-          />
-          {/* Warn when approaching the limit */}
-          {text.length > 12000 && (
-            <span
-              className="absolute bottom-3 right-6 text-xs select-none"
-              style={{ color: text.length > 15000 ? "#f87171" : "rgba(255,255,255,0.3)" }}
-            >
-              {text.length}/16000
-            </span>
-          )}
-        </div>
+        {/* ── Custom Keyboard Grid ── */}
+        <div className="flex-1 flex flex-col gap-1.5 px-2 pb-2 pt-2 select-none touch-none">
+          {ROWS.map((row, rIdx) => (
+            <div key={rIdx} className="flex gap-1 w-full justify-center" style={{ gap: "4px" }}>
+              {row.map((key) => {
+                // Determine styling and flex-basis based on key type
+                const isMod = ["Esc", "Tab", "Caps", "Shift", "Bksp", "Enter", "Ctrl", "Alt", "Cmd"].includes(key);
+                const isArrow = ["Up", "Down", "Left", "Right"].includes(key);
+                const isSpace = key === "Space";
 
-        {/* ── Action row ────────────────────────────────────────────────────── */}
-        <div className="flex-shrink-0 flex items-center gap-2 px-4 pb-4">
-          <button
-            type="button"
-            onClick={handlePaste}
-            onTouchEnd={(e) => { e.stopPropagation(); handlePaste(); }}
-            className="rounded-xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white/70 active:bg-white/20 transition-colors"
-          >
-            📋 Paste
-          </button>
-          <div className="flex-1" />
-          {text.trim() && (
-            <span className="text-xs text-white/25 select-none">⌘↩ to send</span>
-          )}
-          <button
-            type="button"
-            onClick={handleSend}
-            onTouchEnd={(e) => { e.stopPropagation(); handleSend(); }}
-            disabled={!text.trim() || !isConnected}
-            className="rounded-xl bg-white px-5 py-2.5 text-sm font-semibold text-black active:scale-95 transition-all disabled:opacity-30 disabled:active:scale-100"
-          >
-            Send →
-          </button>
+                // Active states
+                const isActiveModifier = activeModifiers.has(key.toLowerCase()) || 
+                  (key === "Cmd" && activeModifiers.has("command"));
+                const isShiftActive = key === "Shift" && shift;
+                const isCapsActive = key === "Caps" && capsLock;
+                const isActive = isActiveModifier || isShiftActive || isCapsActive;
+
+                let flexStyle = "flex-1";
+                if (isSpace) flexStyle = "flex-[4]";
+                else if (isMod) flexStyle = "flex-[1.5]";
+                else if (isArrow) flexStyle = "flex-[1.2]";
+                
+                // Render character with casing
+                let displayChar = key;
+                if (!isMod && !isArrow && !isSpace && key.length === 1) {
+                  displayChar = (capsLock !== shift) ? key.toUpperCase() : key;
+                }
+
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    // Use onPointerDown for instant response (faster than onClick/onTouchEnd)
+                    onPointerDown={(e) => handleKeyPress(key, e)}
+                    className={`${flexStyle} min-w-0 rounded-md py-3 md:py-4 flex items-center justify-center text-sm md:text-base font-medium shadow-sm active:scale-95 active:bg-white/30 transition-all ${
+                      isActive ? "bg-white text-black" : "bg-white/10 text-white"
+                    } ${isMod || isArrow ? "text-xs px-1" : ""}`}
+                    // Prevent context menus on long press
+                    onContextMenu={(e) => e.preventDefault()}
+                  >
+                    {isSpace ? "" : displayChar}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       </div>
     </>
