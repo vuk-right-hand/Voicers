@@ -746,6 +746,9 @@ export default function SessionPage() {
               }
             } else {
               lastTapTime.current = now;
+              // Single tap — remind the user how to wake up
+              setPocketToast(true);
+              setTimeout(() => setPocketToast(false), 2000);
             }
           }}
           onTouchStart={(e) => e.preventDefault()}
