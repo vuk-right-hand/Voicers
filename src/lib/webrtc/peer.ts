@@ -8,22 +8,24 @@
 import type { SignalingData } from "@/types";
 import { updateSignalingData, subscribeToSession } from "./signaling";
 
-function getRtcConfig(): RTCConfiguration {
-  const iceServers: RTCIceServer[] = [
+// Fetches ICE servers from a metered.ca-style credentials API endpoint.
+// Falls back to Google STUN only if the fetch fails or no key is configured.
+export async function fetchIceServers(): Promise<RTCIceServer[]> {
+  const fallback: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
   ];
   try {
-    const url = localStorage.getItem("voicer_turn_url");
-    if (url) {
-      iceServers.push({
-        urls: url,
-        username: localStorage.getItem("voicer_turn_username") ?? undefined,
-        credential: localStorage.getItem("voicer_turn_credential") ?? undefined,
-      });
-    }
-  } catch { /* localStorage unavailable (SSR guard) */ }
-  return { iceServers };
+    const apiUrl = localStorage.getItem("voicer_turn_api_url");
+    const apiKey = localStorage.getItem("voicer_turn_api_key");
+    if (!apiUrl || !apiKey) return fallback;
+    const res = await fetch(`${apiUrl}?apiKey=${apiKey}`);
+    if (!res.ok) return fallback;
+    const servers: RTCIceServer[] = await res.json();
+    return servers.length ? servers : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export interface PeerConnection {
@@ -43,7 +45,9 @@ export function initiateCall(
   onDataChannel: (dc: RTCDataChannel) => void,
   onStateChange: (state: RTCPeerConnectionState) => void,
 ): { pc: RTCPeerConnection; close: () => void } {
-  const pc = new RTCPeerConnection(getRtcConfig());
+  // RTCPeerConnection must be created synchronously so we can return pc + close
+  // immediately. ICE server fetch happens inside the async IIFE below before the offer.
+  const pc = new RTCPeerConnection();
   const iceQueue: RTCIceCandidateInit[] = [];
   let remoteDescriptionSet = false;
   let channel: ReturnType<typeof subscribeToSession> | null = null;
@@ -109,9 +113,14 @@ export function initiateCall(
     }
   }, undefined, "peer");
 
-  // 7. Create offer and send to host
+  // 7. Fetch ICE servers, reconfigure, create offer and send to host
   (async () => {
     try {
+      // Reconfigure with TURN credentials before generating candidates
+      const iceServers = await fetchIceServers();
+      const config = pc.getConfiguration();
+      pc.setConfiguration({ ...config, iceServers });
+
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 

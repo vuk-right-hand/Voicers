@@ -19,25 +19,21 @@ export default function DashboardPage() {
 
   // ── TURN config (BYOK, stored in localStorage) ──────────────────────────
   const [turnOpen, setTurnOpen] = useState(false);
-  const [turnUrl, setTurnUrl] = useState("");
-  const [turnUser, setTurnUser] = useState("");
-  const [turnCred, setTurnCred] = useState("");
+  const [turnApiUrl, setTurnApiUrl] = useState("");
+  const [turnApiKey, setTurnApiKey] = useState("");
 
   useEffect(() => {
-    setTurnUrl(localStorage.getItem("voicer_turn_url") ?? "");
-    setTurnUser(localStorage.getItem("voicer_turn_username") ?? "");
-    setTurnCred(localStorage.getItem("voicer_turn_credential") ?? "");
+    setTurnApiUrl(localStorage.getItem("voicer_turn_api_url") ?? "");
+    setTurnApiKey(localStorage.getItem("voicer_turn_api_key") ?? "");
   }, []);
 
   const saveTurn = () => {
-    if (turnUrl.trim()) {
-      localStorage.setItem("voicer_turn_url", turnUrl.trim());
-      localStorage.setItem("voicer_turn_username", turnUser.trim());
-      localStorage.setItem("voicer_turn_credential", turnCred.trim());
+    if (turnApiUrl.trim() && turnApiKey.trim()) {
+      localStorage.setItem("voicer_turn_api_url", turnApiUrl.trim());
+      localStorage.setItem("voicer_turn_api_key", turnApiKey.trim());
     } else {
-      localStorage.removeItem("voicer_turn_url");
-      localStorage.removeItem("voicer_turn_username");
-      localStorage.removeItem("voicer_turn_credential");
+      localStorage.removeItem("voicer_turn_api_url");
+      localStorage.removeItem("voicer_turn_api_key");
     }
     setTurnOpen(false);
   };
@@ -205,31 +201,24 @@ export default function DashboardPage() {
           onClick={() => setTurnOpen((o) => !o)}
           className="w-full text-xs text-zinc-600 flex items-center justify-between px-3 py-2 rounded-xl hover:bg-zinc-900 transition-colors"
         >
-          <span>TURN Server {turnUrl ? <span className="text-green-500 ml-1">●</span> : <span className="text-zinc-700 ml-1">○</span>}</span>
+          <span>TURN Server {turnApiKey ? <span className="text-green-500 ml-1">●</span> : <span className="text-zinc-700 ml-1">○</span>}</span>
           <span>{turnOpen ? "▲" : "▼"}</span>
         </button>
         {turnOpen && (
           <div className="mt-2 flex flex-col gap-2 bg-zinc-900 rounded-2xl p-4">
-            <p className="text-xs text-zinc-500">Required for 4G connections. Get free credentials at metered.ca</p>
+            <p className="text-xs text-zinc-500">Required for 4G. Paste your metered.ca credentials API URL and key.</p>
             <input
               type="text"
-              placeholder="turn:relay.example.com:443"
-              value={turnUrl}
-              onChange={(e) => setTurnUrl(e.target.value)}
-              className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
-            />
-            <input
-              type="text"
-              placeholder="Username"
-              value={turnUser}
-              onChange={(e) => setTurnUser(e.target.value)}
+              placeholder="https://yourapp.metered.live/api/v1/turn/credentials"
+              value={turnApiUrl}
+              onChange={(e) => setTurnApiUrl(e.target.value)}
               className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
             />
             <input
               type="password"
-              placeholder="Credential"
-              value={turnCred}
-              onChange={(e) => setTurnCred(e.target.value)}
+              placeholder="API Key"
+              value={turnApiKey}
+              onChange={(e) => setTurnApiKey(e.target.value)}
               className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
             />
             <button
