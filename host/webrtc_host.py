@@ -8,13 +8,14 @@ Realtime), then responds with an SDP answer. The phone creates the data channel.
 import asyncio
 import json
 import logging
+import os
 import time
 from fractions import Fraction
 
 import mss
 import numpy as np
 from PIL import Image
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaStreamTrack
 import av
 
@@ -35,6 +36,24 @@ from supabase_client import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_rtc_config() -> RTCConfiguration:
+    """Build RTCConfiguration with STUN always on, TURN from .env if set."""
+    ice_servers = [
+        RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+        RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
+    ]
+    turn_url = os.environ.get("TURN_URL")
+    if turn_url:
+        ice_servers.append(RTCIceServer(
+            urls=[turn_url],
+            username=os.environ.get("TURN_USERNAME", ""),
+            credential=os.environ.get("TURN_CREDENTIAL", ""),
+        ))
+        logger.info("TURN server configured: %s", turn_url)
+    return RTCConfiguration(iceServers=ice_servers)
+
 
 # Target resolution for streaming (downscale from native)
 STREAM_WIDTH = 1920
@@ -161,7 +180,7 @@ class WebRTCHost:
         if self.pc:
             await self.pc.close()
 
-        self.pc = RTCPeerConnection()
+        self.pc = RTCPeerConnection(configuration=_build_rtc_config())
         self._ice_queue = []
         self._remote_description_set = False
 

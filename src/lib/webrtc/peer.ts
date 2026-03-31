@@ -8,12 +8,23 @@
 import type { SignalingData } from "@/types";
 import { updateSignalingData, subscribeToSession } from "./signaling";
 
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
+function getRtcConfig(): RTCConfiguration {
+  const iceServers: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-  ],
-};
+  ];
+  try {
+    const url = localStorage.getItem("voicer_turn_url");
+    if (url) {
+      iceServers.push({
+        urls: url,
+        username: localStorage.getItem("voicer_turn_username") ?? undefined,
+        credential: localStorage.getItem("voicer_turn_credential") ?? undefined,
+      });
+    }
+  } catch { /* localStorage unavailable (SSR guard) */ }
+  return { iceServers };
+}
 
 export interface PeerConnection {
   stream: MediaStream;
@@ -32,7 +43,7 @@ export function initiateCall(
   onDataChannel: (dc: RTCDataChannel) => void,
   onStateChange: (state: RTCPeerConnectionState) => void,
 ): { pc: RTCPeerConnection; close: () => void } {
-  const pc = new RTCPeerConnection(RTC_CONFIG);
+  const pc = new RTCPeerConnection(getRtcConfig());
   const iceQueue: RTCIceCandidateInit[] = [];
   let remoteDescriptionSet = false;
   let channel: ReturnType<typeof subscribeToSession> | null = null;

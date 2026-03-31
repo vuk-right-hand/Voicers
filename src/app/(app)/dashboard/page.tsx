@@ -16,6 +16,31 @@ export default function DashboardPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [isWaking, setIsWaking] = useState(false);
   const [wakeError, setWakeError] = useState<string | null>(null);
+
+  // ── TURN config (BYOK, stored in localStorage) ──────────────────────────
+  const [turnOpen, setTurnOpen] = useState(false);
+  const [turnUrl, setTurnUrl] = useState("");
+  const [turnUser, setTurnUser] = useState("");
+  const [turnCred, setTurnCred] = useState("");
+
+  useEffect(() => {
+    setTurnUrl(localStorage.getItem("voicer_turn_url") ?? "");
+    setTurnUser(localStorage.getItem("voicer_turn_username") ?? "");
+    setTurnCred(localStorage.getItem("voicer_turn_credential") ?? "");
+  }, []);
+
+  const saveTurn = () => {
+    if (turnUrl.trim()) {
+      localStorage.setItem("voicer_turn_url", turnUrl.trim());
+      localStorage.setItem("voicer_turn_username", turnUser.trim());
+      localStorage.setItem("voicer_turn_credential", turnCred.trim());
+    } else {
+      localStorage.removeItem("voicer_turn_url");
+      localStorage.removeItem("voicer_turn_username");
+      localStorage.removeItem("voicer_turn_credential");
+    }
+    setTurnOpen(false);
+  };
   // Elapsed seconds since we first observed the offline state.
   // Ghost-press protection uses this instead of server timestamps to avoid
   // phone clock skew (a ±2min drift would bypass the 10s threshold entirely).
@@ -172,6 +197,51 @@ export default function DashboardPage() {
           </button>
         </div>
       )}
+
+      {/* ── TURN Server config (for 4G / CGNAT) ────────────────────────────── */}
+      <div className="w-full max-w-xs">
+        <button
+          type="button"
+          onClick={() => setTurnOpen((o) => !o)}
+          className="w-full text-xs text-zinc-600 flex items-center justify-between px-3 py-2 rounded-xl hover:bg-zinc-900 transition-colors"
+        >
+          <span>TURN Server {turnUrl ? <span className="text-green-500 ml-1">●</span> : <span className="text-zinc-700 ml-1">○</span>}</span>
+          <span>{turnOpen ? "▲" : "▼"}</span>
+        </button>
+        {turnOpen && (
+          <div className="mt-2 flex flex-col gap-2 bg-zinc-900 rounded-2xl p-4">
+            <p className="text-xs text-zinc-500">Required for 4G connections. Get free credentials at metered.ca</p>
+            <input
+              type="text"
+              placeholder="turn:relay.example.com:443"
+              value={turnUrl}
+              onChange={(e) => setTurnUrl(e.target.value)}
+              className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
+            />
+            <input
+              type="text"
+              placeholder="Username"
+              value={turnUser}
+              onChange={(e) => setTurnUser(e.target.value)}
+              className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
+            />
+            <input
+              type="password"
+              placeholder="Credential"
+              value={turnCred}
+              onChange={(e) => setTurnCred(e.target.value)}
+              className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
+            />
+            <button
+              type="button"
+              onClick={saveTurn}
+              className="rounded-xl bg-white px-4 py-2 text-xs font-semibold text-black active:scale-95 transition-transform"
+            >
+              Save
+            </button>
+          </div>
+        )}
+      </div>
     </main>
   );
 }
