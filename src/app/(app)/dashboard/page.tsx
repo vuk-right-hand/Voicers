@@ -5,11 +5,19 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { fetchActiveSession, subscribeToSession } from "@/lib/webrtc/signaling";
 import { useSessionStore } from "@/hooks/use-session";
+import QRCode from "react-qr-code";
 import type { Session, SignalingData } from "@/types";
+
+const APP_URL = "https://voicers.vercel.app/dashboard";
 
 export default function DashboardPage() {
   const router = useRouter();
   const { connectToHost, transportStatus } = useSessionStore();
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    setIsDesktop(!/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
+  }, []);
   const [session, setSession] = useState<Session | null>(null);
   const [hostReady, setHostReady] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -143,6 +151,22 @@ export default function DashboardPage() {
   };
 
   const isConnecting = transportStatus === "signaling" || transportStatus === "connecting";
+
+  // ─── Desktop view ─────────────────────────────────────────────────────────────
+  if (isDesktop) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-10 bg-black p-6 text-white">
+        <h1 className="text-3xl font-bold">Voicer</h1>
+        <div className="flex flex-col items-center gap-3 text-center">
+          <p className="text-lg font-semibold">Open Voicer on your phone</p>
+          <p className="font-mono text-sm text-zinc-500">{APP_URL.replace("https://", "")}</p>
+        </div>
+        <div className="rounded-2xl bg-white p-4">
+          <QRCode value={APP_URL} size={200} bgColor="#ffffff" fgColor="#000000" />
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="flex flex-1 flex-col items-center justify-center gap-8 p-6">

@@ -42,7 +42,7 @@ export async function POST() {
 
   if (linkError || !linkData.properties?.action_link) {
     console.error("generateLink error:", linkError);
-    return NextResponse.json({ error: `Supabase Generate Link Error: ${(linkError as any)?.message || 'Unknown'}` }, { status: 500 });
+    return NextResponse.json({ error: "Failed to generate link" }, { status: 500 });
   }
 
   const magicLink = linkData.properties.action_link;
@@ -58,7 +58,7 @@ export async function POST() {
       // e.g. "Voicer <noreply@yourdomain.com>"
       from: process.env.RESEND_FROM_EMAIL ?? "Voicer <onboarding@resend.dev>",
       to: user.email,
-      subject: "Connect your second device to Voicer",
+      subject: "Connect your devices — Voicer",
       html: `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -72,13 +72,12 @@ export async function POST() {
         </td></tr>
 
         <tr><td style="padding-bottom:12px;">
-          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">Connect your second device</p>
+          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">Connect your devices</p>
         </td></tr>
 
         <tr><td style="padding-bottom:24px;">
           <p style="margin:0;font-size:15px;line-height:1.6;color:#a1a1aa;">
-            To establish a <strong style="color:#ffffff;">Proof Key for Code Exchange (PKCE)</strong>,
-            tap the button below on your second device. This securely links it to your account.
+            Tap the link below to connect this device and the device you used to sign up for Voicer.
           </p>
         </td></tr>
 
@@ -105,9 +104,8 @@ export async function POST() {
   });
 
   if (!res.ok) {
-    const body = await res.text();
-    console.error("Resend error:", body);
-    return NextResponse.json({ error: `Resend API Error: ${body}` }, { status: 500 });
+    console.error("Resend error:", await res.text());
+    return NextResponse.json({ error: "Failed to send email" }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });

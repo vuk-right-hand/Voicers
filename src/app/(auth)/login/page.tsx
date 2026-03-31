@@ -15,13 +15,11 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>("auth");
-  const [copied, setCopied] = useState(false);
   const [resendStatus, setResendStatus] = useState<string>("idle");
-  const [verifyUrl, setVerifyUrl] = useState("https://voicers.vercel.app/verify");
-  const [linkDebug, setLinkDebug] = useState<string>(""); // temporary debug output
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const lastEmailSentRef = useRef<number>(0);
 
   useEffect(() => {
     const supabase = createClient();
@@ -37,28 +35,25 @@ export default function LoginPage() {
     // We parse the tokens ourselves and force-set the session — no race conditions.
     if (isImplicitDeviceB) {
       setScreen("linking");
-      setLinkDebug("Detected magic link hash. Parsing tokens…");
 
       const params = new URLSearchParams(hash.substring(1)); // strip leading #
       const accessToken = params.get("access_token");
       const refreshToken = params.get("refresh_token");
 
       if (!accessToken || !refreshToken) {
-        setLinkDebug(`Missing tokens. access=${!!accessToken} refresh=${!!refreshToken}. Hash: ${hash.substring(0, 80)}`);
+        setError("Invalid link — please request a new one from your other device.");
+        setScreen("auth");
         return;
       }
-
-      setLinkDebug("Tokens found. Calling setSession…");
 
       supabase.auth
         .setSession({ access_token: accessToken, refresh_token: refreshToken })
         .then(async ({ data: { session }, error: sessionError }) => {
           if (sessionError || !session) {
-            setLinkDebug(`setSession failed: ${sessionError?.message ?? "no session returned"}`);
+            setError("Link expired or invalid — please request a new one.");
+            setScreen("auth");
             return;
           }
-
-          setLinkDebug(`Session OK (${session.user.email}). Stamping device_b…`);
 
           const linkedAt = new Date().toISOString();
           await Promise.all([
@@ -71,11 +66,11 @@ export default function LoginPage() {
             }),
           ]);
 
-          setLinkDebug("Stamped! Redirecting to dashboard…");
           window.location.replace("/dashboard");
         })
-        .catch((err) => {
-          setLinkDebug(`Caught error: ${err?.message ?? err}`);
+        .catch(() => {
+          setError("Something went wrong — please try the link again.");
+          setScreen("auth");
         });
 
       // Clean the hash from the URL bar (cosmetic)
@@ -102,24 +97,21 @@ export default function LoginPage() {
       }
 
       // Unlinked session → waiting room
-      const provider = session.user.app_metadata?.provider ?? "email";
-      setVerifyUrl(buildVerifyUrl(provider, session.user.email));
       setScreen("waiting");
       setupRealtimeListener(supabase, session.user.id);
+      fetch("/api/send-verify-email", { method: "POST" }).catch(() => null);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      if (channelRef.current) {
+        clearInterval((channelRef.current as any)._pollInterval);
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const buildVerifyUrl = (provider: string, userEmail?: string | null) => {
-    const base = "https://voicers.vercel.app/verify";
-    const p = provider === "email" ? "email" : provider; // github | google | email
-    if (provider === "email" && userEmail) {
-      return `${base}?p=email&e=${encodeURIComponent(userEmail)}`;
-    }
-    return `${base}?p=${p}`;
-  };
 
   // ─── OAuth (Device A) ─────────────────────────────────────────────────────────
   // Pass ?next=/login so the callback skips stamping device_b_linked_at and
@@ -145,8 +137,7 @@ export default function LoginPage() {
     setStatus("Authenticating...");
 
     try {
-      const supabase = createClient();
-      supabaseRef.current = supabase;
+      const supabase = supabaseRef.current!;
       let authError: { message: string } | null = null;
 
       if (isSignUp) {
@@ -178,17 +169,11 @@ export default function LoginPage() {
         return;
       }
 
-      // New or unlinked session — fire the "connect second device" email,
-      // then show the PKCE waiting room as a fallback
-      const url = buildVerifyUrl("email", email);
-      setVerifyUrl(url);
+      // New or unlinked session → waiting room
       setStatus(null);
       setLoading(false);
       setScreen("waiting");
       setupRealtimeListener(supabase, session.user.id);
-
-      // Fire and forget — if Resend fails, modal is still the fallback
-      fetch("/api/send-verify-email", { method: "POST" }).catch(() => null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setStatus(null);
@@ -199,8 +184,9 @@ export default function LoginPage() {
   // ─── Realtime listener ───────────────────────────────────────────────────────
 
   const setupRealtimeListener = (supabase: SupabaseClient, userId: string) => {
-    // Unsubscribe any existing channel before creating a new one
+    // Clean up any existing channel + poll interval before creating new ones
     if (channelRef.current) {
+      clearInterval((channelRef.current as any)._pollInterval);
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
     }
@@ -251,18 +237,15 @@ export default function LoginPage() {
         <div className="flex flex-col items-center gap-4 text-center">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white" />
           <p className="text-zinc-400">Connecting your device…</p>
-          {linkDebug && (
-            <p className="max-w-xs break-all text-xs text-zinc-600 font-mono">{linkDebug}</p>
-          )}
         </div>
       </main>
     );
   }
 
-  // ─── Render: PKCE waiting room ───────────────────────────────────────────────
+  // ─── Render: waiting room ────────────────────────────────────────────────────
 
   if (screen === "waiting") {
-    const isEmailPath = verifyUrl.includes("?p=email");
+    const isMobile = typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-black p-6 text-white">
@@ -280,80 +263,50 @@ export default function LoginPage() {
           </button>
 
           <div className="flex flex-col gap-2 pr-6">
-            <p className="font-semibold text-white">Connect your second device</p>
-            {isEmailPath ? (
-              <p className="text-sm text-zinc-400 leading-relaxed">
-                We&apos;ve sent a connection link to your inbox. Open it on your second device and tap the button inside.
-              </p>
-            ) : (
-              <p className="text-sm text-zinc-400 leading-relaxed">
-                To establish a Proof Key for Code Exchange (PKCE), type this URL on your second device:
-              </p>
-            )}
-          </div>
-
-          {/* Manual fallback URL — always shown */}
-          <div>
-            {isEmailPath && (
-              <p className="mb-2 text-xs text-zinc-600">Or type this URL manually:</p>
-            )}
-            <div className="flex items-center gap-3 rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3">
-              <span className="flex-1 truncate font-mono text-sm text-white">
-                {verifyUrl.replace("https://", "")}
-              </span>
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(verifyUrl);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
-                }}
-                className={`shrink-0 transition-colors ${copied ? "text-green-400" : "text-zinc-500 hover:text-zinc-300"}`}
-                title="Copy full URL"
-              >
-                {copied ? (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                ) : (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                )}
-              </button>
-            </div>
+            <p className="font-semibold text-white">Check your email</p>
+            <p className="text-sm text-zinc-400 leading-relaxed">
+              {isMobile
+                ? "We've sent a link to your inbox. Open it on your desktop to connect your devices. Check spam too."
+                : "We've sent a link to your inbox. Open it on your phone to connect your devices. Check spam too."}
+            </p>
           </div>
 
           <p className="animate-pulse text-center text-xs text-zinc-600">
             Waiting for the other device to connect…
           </p>
 
-          {isEmailPath && (
-            <button
-              onClick={async () => {
-                setResendStatus("sending");
-                try {
-                  const res = await fetch("/api/send-verify-email", { method: "POST" });
-                  if (!res.ok) {
-                    const text = await res.text();
-                    setResendStatus(`error: ${text || "Unknown"}`);
-                  } else {
-                    setResendStatus("sent");
-                  }
-                } catch (e: any) {
-                  setResendStatus(`error: Network fail`);
-                }
+          <button
+            onClick={async () => {
+              const now = Date.now();
+              const hourMs = 60 * 60 * 1000;
+
+              // Silent rate limit: 1 real send per hour, fake success after that
+              if (now - lastEmailSentRef.current < hourMs) {
+                setResendStatus("sent");
                 setTimeout(() => setResendStatus("idle"), 4000);
-              }}
-              disabled={resendStatus === "sending"}
-              className="text-xs text-zinc-600 hover:text-zinc-400 disabled:opacity-50 transition-colors"
-            >
-              {resendStatus === "sending" && "Sending…"}
-              {resendStatus === "sent" && <span className="text-green-500">Email sent ✓</span>}
-              {resendStatus.startsWith("error") && <span className="text-red-400">Failed: {resendStatus.replace("error: ", "")}</span>}
-              {resendStatus === "idle" && "Didn't get the email? Resend"}
-            </button>
-          )}
+                return;
+              }
+
+              setResendStatus("sending");
+              try {
+                const res = await fetch("/api/send-verify-email", { method: "POST" });
+                if (res.ok) {
+                  lastEmailSentRef.current = now;
+                }
+                // Always show success — don't leak API errors to the user
+                setResendStatus("sent");
+              } catch {
+                setResendStatus("sent");
+              }
+              setTimeout(() => setResendStatus("idle"), 4000);
+            }}
+            disabled={resendStatus === "sending"}
+            className="text-xs text-zinc-600 hover:text-zinc-400 disabled:opacity-50 transition-colors"
+          >
+            {resendStatus === "sending" && "Sending…"}
+            {resendStatus === "sent" && <span className="text-green-500">Check your inbox (and spam)</span>}
+            {resendStatus === "idle" && "Didn't get the email? Resend"}
+          </button>
         </div>
       </main>
     );
