@@ -80,16 +80,9 @@ export function initiateCall(
     onStream(stream);
   };
 
-  // 4. Send our ICE candidates to host via Supabase
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      updateSignalingData(sessionId, {
-        type: "ice-candidate",
-        candidate: JSON.stringify(event.candidate.toJSON()),
-        from: "phone",
-      });
-    }
-  };
+  // 4. ICE candidates are gathered and embedded in the SDP offer (vanilla ICE).
+  //    No trickle — Supabase single-column signaling can't reliably deliver
+  //    rapid individual candidate writes.
 
   // 5. Track connection state
   pc.onconnectionstatechange = () => {
@@ -126,15 +119,35 @@ export function initiateCall(
     }
   }, undefined, "peer");
 
-  // 7. Create offer and send to host
+  // 7. Create offer, wait for ALL ICE candidates, then send to host.
+  //    Chrome gathers candidates asynchronously (trickle ICE). Sending them
+  //    one-by-one through Supabase signaling_data overwrites is unreliable —
+  //    events get coalesced/lost. Instead we wait for gathering to finish so
+  //    all candidates (host, srflx, relay) are embedded in the offer SDP.
   (async () => {
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // Wait for ICE gathering to complete (all candidates collected)
+      if (pc.iceGatheringState !== "complete") {
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (pc.iceGatheringState === "complete") {
+              pc.removeEventListener("icegatheringstatechange", check);
+              resolve();
+            }
+          };
+          pc.addEventListener("icegatheringstatechange", check);
+          // Safety timeout — don't block forever if gathering stalls
+          setTimeout(resolve, 10_000);
+        });
+      }
+
+      // pc.localDescription now has all gathered candidates baked in
       const { error } = await updateSignalingData(sessionId, {
         type: "offer",
-        sdp: offer.sdp!,
+        sdp: pc.localDescription!.sdp,
         from: "phone",
       });
 
