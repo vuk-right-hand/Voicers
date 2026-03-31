@@ -20,6 +20,7 @@ export default function SessionPage() {
     sendCommand,
     disconnect,
     togglePocketMode,
+    setIsPocketMode,
     screenWidth,
     screenHeight,
     remoteCursorPos,
@@ -217,6 +218,7 @@ export default function SessionPage() {
 
   const [pocketButtonVisible, setPocketButtonVisible] = useState(false);
   const [pocketToast, setPocketToast] = useState(false);
+  const [showPocketWarning, setShowPocketWarning] = useState(false);
   const lastTapTime = useRef(0);
 
   useEffect(() => {
@@ -228,6 +230,52 @@ export default function SessionPage() {
       return () => clearTimeout(t);
     }
   }, [isPocketMode]);
+
+  // ─── Auto-Pocket Mode Timer ───────────────────────────────────────────────
+
+  useEffect(() => {
+    let warningTimer: ReturnType<typeof setTimeout> | null = null;
+    let activationTimer: ReturnType<typeof setTimeout> | null = null;
+    
+    const isConnected = transportStatus === "connected";
+
+    if (!isConnected || isPocketMode) {
+      if (warningTimer) clearTimeout(warningTimer);
+      if (activationTimer) clearTimeout(activationTimer);
+      setShowPocketWarning(false);
+      return;
+    }
+
+    const triggerWarning = () => {
+      setShowPocketWarning(true);
+      activationTimer = setTimeout(() => {
+        setShowPocketWarning(false);
+        setIsPocketMode(true);
+      }, 10000); // 10s grace period
+    };
+
+    const resetTimers = () => {
+      if (warningTimer) clearTimeout(warningTimer);
+      if (activationTimer) clearTimeout(activationTimer);
+      setShowPocketWarning(false);
+      warningTimer = setTimeout(triggerWarning, 110000); // 110s idle
+    };
+
+    resetTimers(); // Start clock initially
+
+    const interactionEvents = ['touchstart', 'touchmove', 'click', 'scroll'];
+    interactionEvents.forEach(event => {
+      document.addEventListener(event, resetTimers, { passive: true });
+    });
+
+    return () => {
+      if (warningTimer) clearTimeout(warningTimer);
+      if (activationTimer) clearTimeout(activationTimer);
+      interactionEvents.forEach(event => {
+        document.removeEventListener(event, resetTimers);
+      });
+    };
+  }, [transportStatus, isPocketMode, setIsPocketMode]);
 
   // ─── WakeLock — hold screen on while connected ────────────────────────────
 
@@ -730,6 +778,18 @@ export default function SessionPage() {
           )}
         </div>
       )}
+      {/* ── Auto-Pocket Mode Warning Toast ──────────────────────────────────── */}
+      {showPocketWarning && (
+        <div className="fixed bottom-24 left-1/2 z-[5000] animate-pocket-warning" style={{ transform: "translateX(-50%)" }}>
+          <div className="bg-neutral-900/90 backdrop-blur-md text-white px-5 py-3 rounded-full shadow-2xl border border-neutral-700/50 flex items-center gap-3">
+            <span className="text-xl">🔋</span>
+            <p className="text-sm font-medium tracking-wide">
+              Battery saving starts in 10s... <span className="opacity-70 font-normal">Tap to cancel</span>
+            </p>
+          </div>
+        </div>
+      )}
+
     </main>
   );
 }

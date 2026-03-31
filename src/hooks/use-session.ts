@@ -32,6 +32,7 @@ interface SessionState {
   disconnect: () => void;
   setPcStatus: (status: PcStatus) => void;
   togglePocketMode: () => void;
+  setIsPocketMode: (val: boolean) => void;
   sendCommand: (cmd: PhoneCommand) => void;
 }
 
@@ -182,6 +183,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   togglePocketMode: () =>
     set((state) => ({ isPocketMode: !state.isPocketMode })),
+
+  setIsPocketMode: (val) => set({ isPocketMode: val }),
 
   sendCommand: (cmd) => {
     const { dataChannel, isPocketMode } = get();
