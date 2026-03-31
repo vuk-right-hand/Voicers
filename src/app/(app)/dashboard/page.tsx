@@ -39,13 +39,16 @@ export default function DashboardPage() {
     let channel: ReturnType<typeof subscribeToSession> | null = null;
 
     async function load() {
-      const { data, error } = await fetchActiveSession(userId!);
+      const { data } = await fetchActiveSession(userId!);
       if (data) {
         setSession(data);
         const raw = data.signaling_data;
         const sig: SignalingData | null =
           typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
-        setHostReady(sig?.type === "host-ready");
+        // Accept either signaling_data.type === "host-ready" OR pc_status === "waiting" —
+        // the host writes these in two separate DB calls so a fetch between them would
+        // miss the signaling flag but still see the status.
+        setHostReady(sig?.type === "host-ready" || data.pc_status === "waiting");
 
         // Subscribe for live updates
         channel = subscribeToSession(
@@ -61,7 +64,22 @@ export default function DashboardPage() {
     }
 
     load();
-    return () => { channel?.unsubscribe(); };
+
+    // Polling fallback: if Realtime fires before our subscription is ready we'd
+    // miss the update and stay stuck on "offline". Re-fetch every 5s until ready.
+    const poll = setInterval(async () => {
+      const { data } = await fetchActiveSession(userId!);
+      if (!data) return;
+      const raw = data.signaling_data;
+      const sig: SignalingData | null =
+        typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
+      setHostReady(sig?.type === "host-ready" || data.pc_status === "waiting");
+    }, 5000);
+
+    return () => {
+      channel?.unsubscribe();
+      clearInterval(poll);
+    };
   }, [userId]);
 
   const handleConnect = () => {
