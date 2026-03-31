@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import type { PcStatus, TransportStatus, PhoneCommand } from "@/types";
-import { initiateCall } from "@/lib/webrtc/peer";
+import { initiateCall, fetchIceServers } from "@/lib/webrtc/peer";
 import { useVoiceStore, playTTSAudio } from "@/hooks/use-voice";
 import { CLIPBOARD_TIMEOUT_MS } from "@/lib/constants";
 
@@ -28,7 +28,7 @@ interface SessionState {
   sessionId: string | null;
 
   // Actions
-  connectToHost: (sessionId: string) => void;
+  connectToHost: (sessionId: string) => Promise<void>;
   disconnect: () => void;
   setPcStatus: (status: PcStatus) => void;
   togglePocketMode: () => void;
@@ -73,10 +73,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   isPocketMode: false,
   sessionId: null,
 
-  connectToHost: (sessionId) => {
+  connectToHost: async (sessionId) => {
     // Clean up any existing connection
     _close?.();
     set({ sessionId, transportStatus: "signaling", mediaStream: null, dataChannel: null });
+
+    // Fetch TURN credentials BEFORE creating the peer connection
+    const iceServers = await fetchIceServers();
 
     const { pc, close } = initiateCall(
       sessionId,
@@ -139,6 +142,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           });
         }
       },
+      iceServers,
     );
 
     // Store the pc for ICE restart on app resume

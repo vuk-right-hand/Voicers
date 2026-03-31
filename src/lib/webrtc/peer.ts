@@ -8,23 +8,37 @@
 import type { SignalingData } from "@/types";
 import { updateSignalingData, subscribeToSession } from "./signaling";
 
+const FALLBACK_ICE: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
 // Fetches ICE servers from a metered.ca-style credentials API endpoint.
 // Falls back to Google STUN only if the fetch fails or no key is configured.
 export async function fetchIceServers(): Promise<RTCIceServer[]> {
-  const fallback: RTCIceServer[] = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-  ];
   try {
     const apiUrl = localStorage.getItem("voicer_turn_api_url");
     const apiKey = localStorage.getItem("voicer_turn_api_key");
-    if (!apiUrl || !apiKey) return fallback;
+    if (!apiUrl || !apiKey) return FALLBACK_ICE;
+
     const res = await fetch(`${apiUrl}?apiKey=${apiKey}`);
-    if (!res.ok) return fallback;
-    const servers: RTCIceServer[] = await res.json();
-    return servers.length ? servers : fallback;
-  } catch {
-    return fallback;
+    if (!res.ok) {
+      console.warn("[peer] TURN API returned", res.status);
+      return FALLBACK_ICE;
+    }
+
+    // metered.ca returns `url` (singular string) — RTCIceServer needs `urls`
+    const raw: Array<Record<string, unknown>> = await res.json();
+    const servers: RTCIceServer[] = raw.map((s) => ({
+      urls: (s.urls ?? s.url) as string | string[],
+      ...(s.username ? { username: s.username as string } : {}),
+      ...(s.credential ? { credential: s.credential as string } : {}),
+    }));
+    console.info("[peer] Fetched %d ICE servers (incl. TURN)", servers.length);
+    return servers.length ? servers : FALLBACK_ICE;
+  } catch (err) {
+    console.warn("[peer] TURN fetch failed:", err);
+    return FALLBACK_ICE;
   }
 }
 
@@ -44,10 +58,9 @@ export function initiateCall(
   onStream: (stream: MediaStream) => void,
   onDataChannel: (dc: RTCDataChannel) => void,
   onStateChange: (state: RTCPeerConnectionState) => void,
+  iceServers: RTCIceServer[] = FALLBACK_ICE,
 ): { pc: RTCPeerConnection; close: () => void } {
-  // RTCPeerConnection must be created synchronously so we can return pc + close
-  // immediately. ICE server fetch happens inside the async IIFE below before the offer.
-  const pc = new RTCPeerConnection();
+  const pc = new RTCPeerConnection({ iceServers });
   const iceQueue: RTCIceCandidateInit[] = [];
   let remoteDescriptionSet = false;
   let channel: ReturnType<typeof subscribeToSession> | null = null;
@@ -113,14 +126,9 @@ export function initiateCall(
     }
   }, undefined, "peer");
 
-  // 7. Fetch ICE servers, reconfigure, create offer and send to host
+  // 7. Create offer and send to host
   (async () => {
     try {
-      // Reconfigure with TURN credentials before generating candidates
-      const iceServers = await fetchIceServers();
-      const config = pc.getConfiguration();
-      pc.setConfiguration({ ...config, iceServers });
-
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
