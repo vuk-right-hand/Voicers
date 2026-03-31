@@ -180,7 +180,9 @@ class WebRTCHost:
         if self.pc:
             await self.pc.close()
 
-        self.pc = RTCPeerConnection(configuration=_build_rtc_config())
+        rtc_config = _build_rtc_config()
+        logger.info("ICE servers: %s", [s.urls for s in rtc_config.iceServers])
+        self.pc = RTCPeerConnection(configuration=rtc_config)
         self._ice_queue = []
         self._remote_description_set = False
 
@@ -210,6 +212,11 @@ class WebRTCHost:
                     "host_id": USER_ID,
                 })
 
+        # Log phone's ICE candidates from the offer SDP
+        for line in sdp.splitlines():
+            if line.startswith("a=candidate:"):
+                logger.info("PHONE candidate: %s", line)
+
         # Set remote description (the offer)
         offer = RTCSessionDescription(sdp=sdp, type="offer")
         await self.pc.setRemoteDescription(offer)
@@ -224,6 +231,11 @@ class WebRTCHost:
         # aiortc gathers all ICE candidates during this step (no trickle)
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
+
+        # Log gathered ICE candidates from the answer SDP
+        for line in self.pc.localDescription.sdp.splitlines():
+            if line.startswith("a=candidate:"):
+                logger.info("HOST candidate: %s", line)
 
         # Best-effort: hint higher bitrate for the video sender
         try:
@@ -247,6 +259,7 @@ class WebRTCHost:
 
     async def _handle_ice_candidate(self, candidate_str: str):
         """Add ICE candidate from phone. Parse JSON format from browser."""
+        logger.info("PHONE trickle ICE: %s", candidate_str[:120])
         # Phone sends JSON.stringify(candidate.toJSON()), parse it
         try:
             parsed = json.loads(candidate_str) if isinstance(candidate_str, str) else candidate_str
