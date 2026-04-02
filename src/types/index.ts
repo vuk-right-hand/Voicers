@@ -43,6 +43,7 @@ export type PhoneCommand =
   | { type: "mouseup" }
   | { type: "click" }
   | { type: "double-click" }
+  | { type: "moveto"; x: number; y: number }
   | { type: "get-clipboard" };
 // Note: binary ArrayBuffer (raw PCM audio) is also sent but not typed here
 
@@ -52,7 +53,8 @@ export type HostMessage =
   | { type: "error"; message: string }
   | { type: "stt"; text: string; is_final: boolean }
   | { type: "voice-status"; status: "listening" | "processing" | "speaking" | "idle" }
-  | { type: "clipboard"; text: string };
+  | { type: "clipboard"; text: string }
+  | { type: "clipboard-push"; text: string };
 // Note: binary ArrayBuffer (raw MP3 TTS) is also sent but not typed here
 
 export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "failed";

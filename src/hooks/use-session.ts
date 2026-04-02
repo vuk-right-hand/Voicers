@@ -115,6 +115,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             } else if (msg.type === "clipboard") {
               _clipboardResolve?.(msg.text);
               _clipboardResolve = null;
+            } else if (msg.type === "clipboard-push") {
+              // Host clipboard changed — stash on phone clipboard silently.
+              // writeText() needs a user gesture on Safari so .catch() is required.
+              navigator.clipboard?.writeText(msg.text).catch(() => {});
             } else if (msg.type === "voice-status") {
               // "listening" is set locally in startListening() — ignore host echo
               // to avoid race where _start_voice resolves after voice-stop already ran.

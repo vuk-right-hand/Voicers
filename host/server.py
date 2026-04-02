@@ -33,11 +33,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Voicer Host", version="0.2.0", lifespan=lifespan)
 
-# Allow CORS from PWA during development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict to PWA origin in production
-    allow_methods=["POST"],
+    allow_origins=["https://voicers.vercel.app", "http://localhost:3000"],
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 

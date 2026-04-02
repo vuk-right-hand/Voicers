@@ -14,6 +14,7 @@ from fractions import Fraction
 
 import mss
 import numpy as np
+import pyautogui
 from PIL import Image
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaStreamTrack
@@ -25,6 +26,7 @@ from input import (
     get_cursor_pos,
     type_text_paste_async, get_clipboard_async,
 )
+from clipboard_watcher import ClipboardWatcher
 from gemini_live import GeminiLive
 from screen import get_screen_size
 from supabase_client import (
@@ -125,6 +127,9 @@ class WebRTCHost:
         self._voice_active = False
         self._voice_mode: str | None = None  # "dictation" | "command"
 
+        # Clipboard watcher (pushes PC clipboard changes to phone)
+        self._clipboard_watcher = ClipboardWatcher(callback=self._on_clipboard_change)
+
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
         self.session_id = await upsert_session_async()
@@ -212,11 +217,6 @@ class WebRTCHost:
                     "host_id": USER_ID,
                 })
 
-        # Log phone's ICE candidates from the offer SDP
-        for line in sdp.splitlines():
-            if line.startswith("a=candidate:"):
-                logger.info("PHONE candidate: %s", line)
-
         # Set remote description (the offer)
         offer = RTCSessionDescription(sdp=sdp, type="offer")
         await self.pc.setRemoteDescription(offer)
@@ -231,11 +231,6 @@ class WebRTCHost:
         # aiortc gathers all ICE candidates during this step (no trickle)
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
-
-        # Log gathered ICE candidates from the answer SDP
-        for line in self.pc.localDescription.sdp.splitlines():
-            if line.startswith("a=candidate:"):
-                logger.info("HOST candidate: %s", line)
 
         # Best-effort: hint higher bitrate for the video sender
         try:
@@ -259,7 +254,7 @@ class WebRTCHost:
 
     async def _handle_ice_candidate(self, candidate_str: str):
         """Add ICE candidate from phone. Parse JSON format from browser."""
-        logger.info("PHONE trickle ICE: %s", candidate_str[:120])
+        logger.debug("Phone trickle ICE: %s", candidate_str[:120])
         # Phone sends JSON.stringify(candidate.toJSON()), parse it
         try:
             parsed = json.loads(candidate_str) if isinstance(candidate_str, str) else candidate_str
@@ -313,8 +308,13 @@ class WebRTCHost:
             elif cmd_type == "type-text":
                 # Paste via clipboard (instant). Goes through asyncio.Lock so it
                 # can't clobber a concurrent get-clipboard read mid-flight.
+                # on_before_write tells watcher to ignore our writes right before
+                # they happen (both the paste text and the restore of previous).
                 loop = asyncio.get_running_loop()
-                loop.create_task(type_text_paste_async(data["text"]))
+                loop.create_task(type_text_paste_async(
+                    data["text"],
+                    on_before_write=self._clipboard_watcher.update_last_text,
+                ))
 
             elif cmd_type == "command":
                 result = execute_command(data["action"], data.get("payload", {}))
@@ -347,6 +347,14 @@ class WebRTCHost:
             elif cmd_type == "double-click":
                 double_click()
 
+            elif cmd_type == "moveto":
+                # Move cursor to absolute normalized coords (no click)
+                sw, sh = get_screen_size()
+                pyautogui.moveTo(
+                    max(1, min(int(data["x"] * sw), sw - 1)),
+                    max(1, min(int(data["y"] * sh), sh - 1)),
+                )
+
             elif cmd_type == "get-clipboard":
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._send_clipboard(channel))
@@ -366,6 +374,8 @@ class WebRTCHost:
             # Start broadcasting cursor position to phone (~20 Hz)
             loop = asyncio.get_running_loop()
             loop.create_task(self._cursor_broadcast_loop(channel))
+            # Start clipboard watcher
+            self._clipboard_watcher.start()
 
         channel.on("open", on_open)
 
@@ -378,6 +388,7 @@ class WebRTCHost:
         @channel.on("close")
         def on_close():
             logger.info("Data channel closed")
+            self._clipboard_watcher.stop()
             # Clean up any active voice session on disconnect
             if self._voice_active:
                 loop = asyncio.get_running_loop()
@@ -432,6 +443,15 @@ class WebRTCHost:
         if channel.readyState == "open":
             channel.send(json.dumps({"type": "clipboard", "text": text}))
 
+    def _on_clipboard_change(self, text: str):
+        """Called from clipboard watcher thread when PC clipboard changes."""
+        ch = self.data_channel
+        if ch and ch.readyState == "open":
+            try:
+                ch.send(json.dumps({"type": "clipboard-push", "text": text}))
+            except Exception:
+                pass  # channel closed between check and send
+
     async def _cursor_broadcast_loop(self, channel):
         """Broadcasts normalized PC cursor position to phone at ~20 Hz."""
         screen_w, screen_h = get_screen_size()
@@ -449,6 +469,7 @@ class WebRTCHost:
     async def stop(self):
         """Clean shutdown."""
         self._running = False
+        self._clipboard_watcher.stop()
         if self.pc:
             await self.pc.close()
         if self._channel:

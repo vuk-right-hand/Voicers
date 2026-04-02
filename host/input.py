@@ -25,19 +25,26 @@ def _get_clipboard_lock() -> asyncio.Lock:
     return _clipboard_lock
 
 
-async def type_text_paste_async(text: str) -> None:
+async def type_text_paste_async(text: str, on_before_write=None) -> None:
     """Clipboard-paste with serialization lock.
 
     Runs blocking pyperclip/pyautogui calls in a thread pool so the aiortc
     event loop is free during the paste (pyperclip + hotkey can block 50-200ms
     on Windows). Saves and restores the previous clipboard content so the user's
     PC clipboard isn't silently clobbered by dictated text.
+
+    on_before_write: optional callback(text) called right before pyperclip.copy()
+                     — used by clipboard watcher to suppress echo.
     """
     async with _get_clipboard_lock():
         previous = await asyncio.to_thread(pyperclip.paste)
+        if on_before_write:
+            on_before_write(text)
         await asyncio.to_thread(type_text_paste, text)
         # 100ms: give the OS time to process Ctrl+V before we overwrite the clipboard
         await asyncio.sleep(0.1)
+        if on_before_write:
+            on_before_write(previous)
         await asyncio.to_thread(pyperclip.copy, previous)
 
 
@@ -130,7 +137,7 @@ def execute_command(action: str, payload: dict) -> str | None:
     elif action == "open_url":
         import webbrowser
         url = payload.get("url", "")
-        if url:
+        if url and (url.startswith("https://") or url.startswith("http://")):
             webbrowser.open(url)
         return None
 

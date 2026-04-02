@@ -26,7 +26,15 @@
       "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/dashboard/)",
       "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/settings/)",
       "Bash(ls /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/layout.tsx)",
-      "Bash(cat /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/layout.tsx)"
+      "Bash(cat /c/Antigravity/Voicer/src/app/\\\\\\(app\\\\\\)/layout.tsx)",
+      "Bash(git push:*)",
+      "Bash(where iscc:*)",
+      "Bash(winget list:*)",
+      "Read(//c/Program Files \\(x86\\)/Inno Setup 6/**)",
+      "Read(//c/Program Files/Inno Setup 6/**)",
+      "Read(//c/Users/Korisnik/AppData/Local/Programs/Inno Setup 6/**)",
+      "Read(//c/Users/Korisnik/**)",
+      "Bash(ls -la /c/Antigravity/Voicer/installer/bundle/python/*._pth)"
     ]
   }
 }

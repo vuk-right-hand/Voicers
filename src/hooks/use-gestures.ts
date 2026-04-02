@@ -18,12 +18,13 @@ import {
 
 type GestureState =
   | "idle"
-  | "holding"           // voice: hold timer running (< 200ms = tap)
-  | "zoomed"            // voice/trackpad-glass: sticky zoom active
-  | "strip-scrolling"   // both: 1-finger in scroll zone
-  | "pinching"          // both: 2-finger pinch
-  | "tp-dragging"       // trackpad: 1-finger drag / pre-tap / pre-hold
-  | "tp-highlighting";  // trackpad: hold confirmed, mousedown active, dragging selection
+  | "holding"              // voice: hold timer running (< 200ms = tap)
+  | "zoomed"               // voice/trackpad-glass: sticky zoom active
+  | "zoomed-highlighting"  // voice: hold at max zoom confirmed, mousedown active
+  | "strip-scrolling"      // both: 1-finger in scroll zone
+  | "pinching"             // both: 2-finger pinch
+  | "tp-dragging"          // trackpad: 1-finger drag / pre-tap / pre-hold
+  | "tp-highlighting";     // trackpad: hold confirmed, mousedown active, dragging selection
 
 interface ZoomStyle {
   transform?: string;
@@ -90,6 +91,12 @@ export function useGestures(
   // Track whether the touch originated inside the trackpad (vs video glass)
   const touchInTrackpad = useRef(false);
 
+  // Zoomed highlighting: last normalized coords for computing PC-pixel deltas
+  const lastHighlightNorm = useRef({ x: 0, y: 0 });
+
+  // Safety timeout: auto-release mousedown if touch vanishes without end/cancel
+  const highlightSafetyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Edge momentum
   const edgeMomentum = useRef<{ dx: number; dy: number; animId: number | null }>({
     dx: 0, dy: 0, animId: null,
@@ -114,6 +121,13 @@ export function useGestures(
     if (tpHoldTimer.current) {
       clearTimeout(tpHoldTimer.current);
       tpHoldTimer.current = null;
+    }
+  }, []);
+
+  const clearHighlightSafety = useCallback(() => {
+    if (highlightSafetyTimer.current) {
+      clearTimeout(highlightSafetyTimer.current);
+      highlightSafetyTimer.current = null;
     }
   }, []);
 
@@ -251,11 +265,20 @@ export function useGestures(
     [getVideoContentRect],
   );
 
-  // ─── Clean up on mode switch ────────────────────────────────────────────────
+  // ─── Clean up on mode switch / unmount ──────────────────────────────────────
 
   useEffect(() => {
     stopEdgeMomentum();
   }, [mode, stopEdgeMomentum]);
+
+  useEffect(() => {
+    return () => {
+      clearHoldTimer();
+      clearTpHoldTimer();
+      clearHighlightSafety();
+      stopEdgeMomentum();
+    };
+  }, [clearHighlightSafety, clearHoldTimer, clearTpHoldTimer, stopEdgeMomentum]);
 
   // ─── Voice-mode gesture logic (reused by trackpad glass area) ──────────────
 
@@ -265,15 +288,15 @@ export function useGestures(
       const state = stateRef.current;
 
       if (state === "zoomed") {
-        // New touch while zoomed — potential precision tap, pan, or deeper zoom
+        // New touch while zoomed — potential precision tap, pan, or deeper zoom/highlight
         startPos.current = { x: touch.clientX, y: touch.clientY };
         lastPanPos.current = { x: touch.clientX, y: touch.clientY };
         startTime.current = Date.now();
         isInitialHoldTouch.current = false;
 
-        // Start hold timer for progressive zoom (2x → 3x)
+        clearHoldTimer();
         if (currentZoomLevel.current < SNIPER_ZOOM_LEVEL_2) {
-          clearHoldTimer();
+          // Not at max zoom yet → hold for progressive zoom (2x → 3x)
           holdTimer.current = setTimeout(() => {
             currentZoomLevel.current = SNIPER_ZOOM_LEVEL_2;
             setZoomStyle((prev) => ({
@@ -282,6 +305,26 @@ export function useGestures(
               transition: "transform 0.15s ease-out",
             }));
             setZoomPercent(Math.round(SNIPER_ZOOM_LEVEL_2 * 100));
+          }, SNIPER_ZOOM_HOLD_MS);
+        } else {
+          // At max zoom (300%) → hold to start highlighting
+          holdTimer.current = setTimeout(() => {
+            const coords = getNormalizedCoords(startPos.current.x, startPos.current.y);
+            if (coords) {
+              sendCommand({ type: "moveto", x: coords.x, y: coords.y });
+              sendCommand({ type: "mousedown" });
+              lastHighlightNorm.current = coords;
+              setState("zoomed-highlighting");
+              navigator.vibrate?.(15);
+              // Safety: auto-release if touch vanishes without end/cancel (e.g. incoming call)
+              clearHighlightSafety();
+              highlightSafetyTimer.current = setTimeout(() => {
+                if (stateRef.current === "zoomed-highlighting") {
+                  sendCommand({ type: "mouseup" });
+                  setState("zoomed");
+                }
+              }, 30_000);
+            }
           }, SNIPER_ZOOM_HOLD_MS);
         }
         return;
@@ -317,7 +360,7 @@ export function useGestures(
         setState("zoomed");
       }, SNIPER_ZOOM_HOLD_MS);
     },
-    [clearHoldTimer, setState, videoRef],
+    [clearHighlightSafety, clearHoldTimer, getNormalizedCoords, sendCommand, setState, videoRef],
   );
 
   /** Handle 2+ finger touchStart for pinch (voice-mode style) */
@@ -327,6 +370,18 @@ export function useGestures(
 
       if (state === "zoomed") {
         clearHoldTimer();
+        pinchStartDist.current = getTouchDist(touches[0], touches[1]);
+        pinchStartZoom.current = currentZoomLevel.current;
+        pinchStartTime.current = Date.now();
+        setState("pinching");
+        return;
+      }
+
+      if (state === "zoomed-highlighting") {
+        // Release mouse before entering pinch — don't leave host with button held
+        clearHoldTimer();
+        clearHighlightSafety();
+        sendCommand({ type: "mouseup" });
         pinchStartDist.current = getTouchDist(touches[0], touches[1]);
         pinchStartZoom.current = currentZoomLevel.current;
         pinchStartTime.current = Date.now();
@@ -362,7 +417,7 @@ export function useGestures(
         setState("pinching");
       }
     },
-    [clearHoldTimer, setState, videoRef],
+    [clearHoldTimer, sendCommand, setState, videoRef],
   );
 
   // ─── Touch handlers ─────────────────────────────────────────────────────────
@@ -525,6 +580,20 @@ export function useGestures(
         return;
       }
 
+      // ── Zoomed highlighting (voice mode, at max zoom) ─────────
+      if (state === "zoomed-highlighting" && touches.length === 1) {
+        const coords = getNormalizedCoords(touches[0].clientX, touches[0].clientY);
+        if (coords) {
+          const dx = (coords.x - lastHighlightNorm.current.x) * screenDims.width;
+          const dy = (coords.y - lastHighlightNorm.current.y) * screenDims.height;
+          lastHighlightNorm.current = coords;
+          if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
+            sendCommand({ type: "mousemove", dx, dy });
+          }
+        }
+        return;
+      }
+
       // ── TRACKPAD MODE (trackpad area gestures) ─────────────────
       if (mode === "trackpad" && touchInTrackpad.current) {
         // tp-dragging: cancel hold if moved, send relative movement
@@ -606,8 +675,13 @@ export function useGestures(
         return;
       }
 
-      // Zoomed pan
+      // Zoomed pan (with slop — micro-movement doesn't cancel highlight hold timer)
       if (state === "zoomed" && touches.length === 1) {
+        const slopDx = touches[0].clientX - startPos.current.x;
+        const slopDy = touches[0].clientY - startPos.current.y;
+        if (Math.sqrt(slopDx * slopDx + slopDy * slopDy) <= HOLD_SLOP_RADIUS) {
+          return; // Still within slop — don't pan, let hold timer survive
+        }
         clearHoldTimer();
         const video = videoRef.current;
         if (!video) return;
@@ -634,9 +708,9 @@ export function useGestures(
         return;
       }
     },
-    [clearHoldTimer, clearTpHoldTimer, getUnscaledVideoRect, mode, resetZoom,
-     screenDims, sendCommand, setState, startEdgeMomentum, stopEdgeMomentum,
-     trackpadRect, updatePcCursor, videoRef],
+    [clearHoldTimer, clearTpHoldTimer, getNormalizedCoords, getUnscaledVideoRect,
+     mode, resetZoom, screenDims, sendCommand, setState, startEdgeMomentum,
+     stopEdgeMomentum, trackpadRect, updatePcCursor, videoRef],
   );
 
   const onTouchEnd = useCallback(
@@ -665,6 +739,19 @@ export function useGestures(
           // Trackpad area: stay idle, zoom CSS persists visually
           setState("idle");
         }
+        return;
+      }
+
+      // ── Zoomed highlighting end ────────────────────────────────
+      if (state === "zoomed-highlighting") {
+        clearHighlightSafety();
+        sendCommand({ type: "mouseup" });
+        const endCoords = lastHighlightNorm.current;
+        onHighlightEnd({
+          x: endCoords.x * screenDims.width,
+          y: endCoords.y * screenDims.height,
+        });
+        setState("zoomed"); // stay zoomed for next action
         return;
       }
 
@@ -755,8 +842,9 @@ export function useGestures(
         return;
       }
     },
-    [clearHoldTimer, clearTpHoldTimer, getNormalizedCoords, mode, onDoubleClick,
-     onHighlightEnd, resetZoom, sendCommand, setState, stopEdgeMomentum],
+    [clearHighlightSafety, clearHoldTimer, clearTpHoldTimer, getNormalizedCoords,
+     mode, onDoubleClick, onHighlightEnd, resetZoom, screenDims, sendCommand,
+     setState, stopEdgeMomentum],
   );
 
   // ─── Touch cancel — prevent infinite drift on interruption ──────────────────
@@ -764,13 +852,19 @@ export function useGestures(
   const onTouchCancel = useCallback(() => {
     clearHoldTimer();
     clearTpHoldTimer();
+    clearHighlightSafety();
     stopEdgeMomentum();
     scrollStartedInZone.current = false;
-    if (stateRef.current === "tp-highlighting") {
+    if (stateRef.current === "tp-highlighting" || stateRef.current === "zoomed-highlighting") {
       sendCommand({ type: "mouseup" });
     }
-    setState("idle");
-  }, [clearHoldTimer, clearTpHoldTimer, sendCommand, setState, stopEdgeMomentum]);
+    // Return to zoomed if we were highlighting at zoom, otherwise idle
+    if (stateRef.current === "zoomed-highlighting") {
+      setState("zoomed");
+    } else {
+      setState("idle");
+    }
+  }, [clearHighlightSafety, clearHoldTimer, clearTpHoldTimer, sendCommand, setState, stopEdgeMomentum]);
 
   // Desktop mouse click fallback
   const onMouseDown = useCallback(

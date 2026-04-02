@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Safe-area padding for PWA install banner (notch / status bar) */
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
@@ -42,4 +47,53 @@ body {
 
 .animate-pocket-warning {
   animation: slide-up-fade-in 0.3s ease-out forwards;
+}
+
+/* ── Landing page ── */
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-glow-pulse {
+  animation: glow-pulse 4s ease-in-out infinite;
+}
+
+.animate-blink {
+  animation: blink 1s step-end infinite;
+}
+
+/* Dot grid background */
+.dot-grid {
+  background-image: radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Card glow on hover */
+.card-glow {
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+.card-glow:hover {
+  box-shadow: 0 0 40px rgba(59, 130, 246, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Pricing card highlight */
+.pricing-highlight {
+  background: linear-gradient(180deg, rgba(59,130,246,0.08) 0%, transparent 50%);
 }

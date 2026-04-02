@@ -40,6 +40,12 @@ host/.env
 !.env.local.example
 !host/.env.example
 
+# Installer build artifacts
+installer/bundle/
+installer/Output/
+installer/*.zip
+installer/get-pip.py
+
 # Python
 __pycache__/
 *.py[cod]
