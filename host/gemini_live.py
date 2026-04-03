@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import Callable
 
 from google import genai
@@ -26,8 +27,9 @@ SYSTEM_INSTRUCTION = (
     "Do not answer questions, do not converse, do not provide commentary."
 )
 
-# Skip non-English ASR chunks (Arabic, CJK, etc.)
-_HAS_LATIN = re.compile(r"[a-zA-Z]")
+# Skip non-English ASR chunks (Arabic, CJK hallucinations).
+# Allow Latin letters AND digits — Gemini may transcribe "ten" as "10".
+_HAS_LATIN_OR_DIGIT = re.compile(r"[a-zA-Z0-9]")
 
 
 class GeminiLive:
@@ -39,8 +41,13 @@ class GeminiLive:
     Pure one-way ASR via input_transcription.
     """
 
-    def __init__(self, on_transcript: Callable[[str, bool], None]) -> None:
+    def __init__(
+        self,
+        on_transcript: Callable[[str, bool], None],
+        on_session_dead: Callable[[], None] | None = None,
+    ) -> None:
         self._on_transcript = on_transcript
+        self._on_session_dead = on_session_dead
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
         self._send_task: asyncio.Task | None = None
         self._recv_task: asyncio.Task | None = None
@@ -48,8 +55,9 @@ class GeminiLive:
         self._session = None
         self._session_ctx = None
         self.interim_buffer = ""  # public — caller reads this for final text
+        self._last_activity_start: float = 0.0  # throttle turn_complete → activityStart
 
-    async def start(self) -> None:
+    async def start(self, _preserve_buffer: bool = False) -> None:
         """Open Gemini Live session and start send/recv background tasks."""
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -57,7 +65,8 @@ class GeminiLive:
 
         self._api_key = api_key
         self._active = True
-        self.interim_buffer = ""
+        if not _preserve_buffer:
+            self.interim_buffer = ""
 
         client = genai.Client(api_key=api_key)
 
@@ -132,6 +141,40 @@ class GeminiLive:
 
         logger.info("Gemini Live session stopped")
 
+    async def restart(self) -> None:
+        """Tear down the dead session and open a fresh one, preserving interim_buffer."""
+        saved_buffer = self.interim_buffer
+
+        # Cancel tasks and close session without touching interim_buffer
+        self._active = False
+        tasks = [t for t in [self._send_task, self._recv_task] if t]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._send_task = None
+        self._recv_task = None
+
+        if self._session_ctx is not None:
+            try:
+                await self._session_ctx.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.debug("Gemini session close during restart: %s", exc)
+            self._session_ctx = None
+            self._session = None
+
+        # Drain the audio queue
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # Restore buffer and boot fresh session (flag tells start() not to clear it)
+        self.interim_buffer = saved_buffer
+        await self.start(_preserve_buffer=True)
+        logger.info("Gemini session restarted — buffer preserved (%d chars)", len(saved_buffer))
+
     # ── Internal tasks ────────────────────────────────────────────────────────
 
     async def _send_loop(self) -> None:
@@ -177,16 +220,33 @@ class GeminiLive:
                 if hasattr(content, 'input_transcription') and content.input_transcription and content.input_transcription.text:
                     raw = content.input_transcription.text
                     # English filter: skip chunks with no Latin characters
-                    if raw.strip() and _HAS_LATIN.search(raw):
+                    if raw.strip() and _HAS_LATIN_OR_DIGIT.search(raw):
                         self.interim_buffer = (self.interim_buffer + raw).strip()
                         self._on_transcript(self.interim_buffer, False)
 
-                # Log unexpected turn_complete (shouldn't happen with VAD off)
+                # turn_complete fires when Gemini thinks the user stopped speaking.
+                # Re-send activityStart to keep the turn open so audio sent after
+                # a pause is still transcribed. Throttle to max once per 2s to
+                # prevent a tight loop if Gemini keeps firing turn_complete.
                 if hasattr(content, 'turn_complete') and content.turn_complete:
-                    logger.warning("Unexpected turn_complete with VAD disabled")
+                    now = time.monotonic()
+                    if now - self._last_activity_start >= 2.0:
+                        logger.warning("turn_complete received — reopening turn with activityStart")
+                        try:
+                            await self._session.send_realtime_input(
+                                activity_start=types.ActivityStart()
+                            )
+                            self._last_activity_start = now
+                        except Exception as exc:
+                            logger.warning("Failed to reopen turn after turn_complete: %s", exc)
+                    else:
+                        logger.debug("turn_complete received — throttled (%.1fs since last activityStart)",
+                                     now - self._last_activity_start)
 
         except asyncio.CancelledError:
             pass
         except Exception as exc:
             logger.error("Gemini recv error: %s", exc, exc_info=True)
+            if self._active and self._on_session_dead:
+                self._on_session_dead()
         logger.info("Recv loop ended — %d messages received total", msgs_received)

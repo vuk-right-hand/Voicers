@@ -334,9 +334,11 @@ export default function SessionPage() {
       ? "Signaling..."
       : transportStatus === "connecting"
         ? "Connecting..."
-        : transportStatus === "failed"
-          ? "Connection failed"
-          : null;
+        : transportStatus === "reconnecting"
+          ? "Reconnecting..."
+          : transportStatus === "failed"
+            ? "Connection failed"
+            : null;
 
   // ─── Copy toast position — straddles top/left edge of trackpad ──────────
   // Portrait: bottom 25% is trackpad top edge → toast straddles it (50% in, 50% out)

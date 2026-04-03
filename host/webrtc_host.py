@@ -126,6 +126,7 @@ class WebRTCHost:
         self._gemini: GeminiLive | None = None
         self._voice_active = False
         self._voice_mode: str | None = None  # "dictation" | "command"
+        self._gemini_restarting = False
 
         # Clipboard watcher (pushes PC clipboard changes to phone)
         self._clipboard_watcher = ClipboardWatcher(callback=self._on_clipboard_change)
@@ -209,7 +210,11 @@ class WebRTCHost:
             logger.info("Connection state: %s", state)
             if state == "connected":
                 await update_pc_status_async(self.session_id, "connected")
-            elif state in ("failed", "closed", "disconnected"):
+            elif state == "disconnected":
+                # Transient — WebRTC may self-heal (WiFi jitter, brief packet loss).
+                # Don't tear down; let the ICE agent attempt recovery.
+                logger.info("Connection disconnected (transient) — waiting for recovery")
+            elif state in ("failed", "closed"):
                 await update_pc_status_async(self.session_id, "waiting")
                 # Reset to host-ready for reconnection
                 await write_signaling_async(self.session_id, {
@@ -407,13 +412,35 @@ class WebRTCHost:
                     "is_final": is_final,
                 }))
 
-        self._gemini = GeminiLive(on_transcript=on_transcript)
+        def on_session_dead():
+            """Gemini WebSocket dropped — restart transparently."""
+            if self._voice_active:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._restart_gemini(channel))
+
+        self._gemini = GeminiLive(on_transcript=on_transcript, on_session_dead=on_session_dead)
         await self._gemini.start()
 
         if channel.readyState == "open":
             channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
         logger.info("Voice session started (mode=%s)", self._voice_mode)
+
+    async def _restart_gemini(self, channel):
+        """Restart the Gemini session after a drop, preserving accumulated transcript."""
+        if not self._voice_active or not self._gemini or self._gemini_restarting:
+            return
+        self._gemini_restarting = True
+        logger.warning("Gemini session died — restarting transparently")
+        try:
+            await self._gemini.restart()
+        except Exception as exc:
+            logger.error("Failed to restart Gemini session: %s", exc)
+            return
+        finally:
+            self._gemini_restarting = False
+        if channel.readyState == "open":
+            channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
     async def _stop_voice(self, channel=None):
         """Stop the active Gemini Live session and flush final transcript."""

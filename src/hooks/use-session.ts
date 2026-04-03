@@ -37,6 +37,7 @@ interface SessionState {
 }
 
 let _close: (() => void) | null = null;
+let _disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ─── Clipboard pre-fetch (same module-level pattern as _close) ──────────────
 
@@ -136,14 +137,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // onStateChange
       (state) => {
         if (state === "connecting") set({ transportStatus: "connecting" });
-        else if (state === "connected") set({ transportStatus: "connected" });
+        else if (state === "connected") {
+          // Clear any pending disconnect timer — connection recovered
+          if (_disconnectTimer) {
+            clearTimeout(_disconnectTimer);
+            _disconnectTimer = null;
+          }
+          set({ transportStatus: "connected" });
+        }
         else if (state === "failed") set({ transportStatus: "failed" });
-        else if (state === "disconnected" || state === "closed") {
-          set({
-            transportStatus: "idle",
-            mediaStream: null,
-            dataChannel: null,
-          });
+        else if (state === "disconnected") {
+          // Transient — WebRTC may self-heal. Don't tear down yet.
+          set({ transportStatus: "reconnecting" });
+          // If it doesn't recover within 15s, treat as failed
+          if (_disconnectTimer) clearTimeout(_disconnectTimer);
+          _disconnectTimer = setTimeout(() => {
+            _disconnectTimer = null;
+            if (get().transportStatus === "reconnecting") {
+              set({ transportStatus: "idle", mediaStream: null, dataChannel: null });
+            }
+          }, 15_000);
+        }
+        else if (state === "closed") {
+          if (_disconnectTimer) {
+            clearTimeout(_disconnectTimer);
+            _disconnectTimer = null;
+          }
+          set({ transportStatus: "idle", mediaStream: null, dataChannel: null });
         }
       },
       iceServers,
@@ -177,6 +197,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   disconnect: () => {
     _close?.();
     _close = null;
+    if (_disconnectTimer) {
+      clearTimeout(_disconnectTimer);
+      _disconnectTimer = null;
+    }
     set({
       transportStatus: "idle",
       mediaStream: null,

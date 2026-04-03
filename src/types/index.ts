@@ -57,7 +57,7 @@ export type HostMessage =
   | { type: "clipboard-push"; text: string };
 // Note: binary ArrayBuffer (raw MP3 TTS) is also sent but not typed here
 
-export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "failed";
+export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "reconnecting" | "failed";
 
 export interface Subscription {
   id: string;
