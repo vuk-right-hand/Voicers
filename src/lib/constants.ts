@@ -76,8 +76,8 @@ export const TRACKPAD_MOVE_SENSITIVITY = 2.0;
 /** Outer edge zone that triggers continuous cursor movement during highlight drag */
 export const EDGE_MOMENTUM_ZONE = 0.10;
 
-/** Base pixels per rAF frame for edge momentum (scaled by TRACKPAD_MOVE_SENSITIVITY × 1.25) */
-export const EDGE_MOMENTUM_SPEED = 3;
+/** Base pixels per rAF frame for edge momentum (scaled by TRACKPAD_MOVE_SENSITIVITY) */
+export const EDGE_MOMENTUM_SPEED = 2;
 
 /** Double-tap detection window (ms) in trackpad mode */
 export const TRACKPAD_DOUBLE_TAP_MS = 350;

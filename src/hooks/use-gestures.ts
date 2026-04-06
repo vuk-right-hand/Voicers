@@ -638,7 +638,7 @@ export function useGestures(
           const tpR = trackpadRect;
           const tx = touches[0].clientX;
           const ty = touches[0].clientY;
-          const speed = EDGE_MOMENTUM_SPEED * TRACKPAD_MOVE_SENSITIVITY * 1.25;
+          const speed = EDGE_MOMENTUM_SPEED * TRACKPAD_MOVE_SENSITIVITY;
           const nearLeft = tpR ? tx < tpR.left + tpR.width * EDGE_MOMENTUM_ZONE : tx < window.innerWidth * EDGE_MOMENTUM_ZONE;
           const nearRight = tpR ? tx > tpR.left + tpR.width * (1 - EDGE_MOMENTUM_ZONE) : tx > window.innerWidth * (1 - EDGE_MOMENTUM_ZONE);
           const nearTop = tpR ? ty < tpR.top + tpR.height * EDGE_MOMENTUM_ZONE : ty < window.innerHeight * EDGE_MOMENTUM_ZONE;

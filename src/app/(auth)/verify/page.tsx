@@ -1,22 +1,14 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-
-type Screen = "form" | "sent";
 
 // ─── Inner component (needs useSearchParams → must be inside Suspense) ─────────
 
 function VerifyContent() {
   const searchParams = useSearchParams();
-  const provider = searchParams.get("p") ?? "email"; // "email" | "github" | "google"
-  const emailParam = searchParams.get("e") ?? "";    // pre-filled from the Resend link
-
-  const [email, setEmail] = useState(emailParam);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [screen, setScreen] = useState<Screen>("form");
+  const provider = searchParams.get("p"); // "github" | "google"
 
   // ─── OAuth ─────────────────────────────────────────────────────────────────
   // No ?next param → callback defaults to /session → stamps device_b_linked_at
@@ -29,62 +21,7 @@ function VerifyContent() {
     });
   };
 
-  // ─── Magic link ────────────────────────────────────────────────────────────
-
-  const handleSendLink = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-
-    const supabase = createClient();
-    const { error: otpError } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        shouldCreateUser: false,
-        emailRedirectTo: `${window.location.origin}/callback`,
-      },
-    });
-
-    if (otpError) {
-      setError(otpError.message);
-      setLoading(false);
-      return;
-    }
-
-    setLoading(false);
-    setScreen("sent");
-  };
-
-  // ─── Sent confirmation ─────────────────────────────────────────────────────
-
-  if (screen === "sent") {
-    return (
-      <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-black p-6 text-white">
-        <h1 className="text-3xl font-bold">Voicer</h1>
-        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full border border-zinc-700">
-            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400">
-              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
-              <polyline points="22,6 12,13 2,6" />
-            </svg>
-          </div>
-          <p className="text-lg font-semibold">Check your inbox</p>
-          <p className="text-sm text-zinc-400 leading-relaxed">
-            We sent a connection link to <span className="text-white">{email}</span>.
-            Tap it to connect this device.
-          </p>
-          <button
-            onClick={() => { setScreen("form"); setError(null); }}
-            className="text-sm text-zinc-500 hover:text-zinc-300"
-          >
-            ← Try a different email
-          </button>
-        </div>
-      </main>
-    );
-  }
-
-  // ─── GitHub-only view ──────────────────────────────────────────────────────
+  // ─── GitHub ────────────────────────────────────────────────────────────────
 
   if (provider === "github") {
     return (
@@ -109,7 +46,7 @@ function VerifyContent() {
     );
   }
 
-  // ─── Google-only view ──────────────────────────────────────────────────────
+  // ─── Google ────────────────────────────────────────────────────────────────
 
   if (provider === "google") {
     return (
@@ -137,36 +74,20 @@ function VerifyContent() {
     );
   }
 
-  // ─── Email / default view ──────────────────────────────────────────────────
+  // ─── No valid provider → redirect to login ─────────────────────────────────
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-black p-6 text-white">
       <h1 className="text-3xl font-bold">Voicer</h1>
       <p className="text-zinc-400 text-center max-w-xs">
-        Enter your email to receive a secure connection link.
+        Invalid link. Please sign in from the main page.
       </p>
-
-      <form onSubmit={handleSendLink} className="flex w-full max-w-sm flex-col gap-4">
-        <input
-          type="email"
-          placeholder="Email you signed up with"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          required
-          autoComplete="email"
-          className="rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-white placeholder-zinc-500 outline-none focus:border-zinc-500"
-        />
-
-        {error && <p className="text-sm text-red-400">{error}</p>}
-
-        <button
-          type="submit"
-          disabled={loading}
-          className="rounded-xl bg-white px-6 py-3 font-semibold text-black transition-transform active:scale-95 disabled:opacity-50"
-        >
-          {loading ? "..." : "Send connection link"}
-        </button>
-      </form>
+      <a
+        href="/login"
+        className="rounded-xl bg-white px-6 py-3 font-semibold text-black transition-transform active:scale-95"
+      >
+        Go to login
+      </a>
     </main>
   );
 }

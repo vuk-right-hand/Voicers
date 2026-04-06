@@ -97,6 +97,7 @@ export default function SessionPage() {
 
   const [extractionToast, setExtractionToast] = useState(false);
   const [fetchedText, setFetchedText] = useState("");
+  const [copiedConfirm, setCopiedConfirm] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Paste pill ───────────────────────────────────────────────────────────
@@ -152,21 +153,30 @@ export default function SessionPage() {
     // rejection that silently bypasses the execCommand fallback above.
     navigator.clipboard?.writeText(fetchedText).catch(() => {});
 
-    // Stash text, snap back to voice — pill activates automatically
+    // Stash text — show checkmark confirmation then fade
     setCopiedText(fetchedText);
-    dismissToast();
-    setMode("voice");
+    setCopiedConfirm(true);
+    setTimeout(() => {
+      dismissToast();
+      setCopiedConfirm(false);
+      if (mode === "trackpad") setMode("voice");
+    }, 600);
   };
 
   const handlePaste = async () => {
     let textToPaste = "";
 
-    // Try to read phone's current clipboard first (user copied from Safari, Notes, etc)
-    try {
-      textToPaste = await navigator.clipboard.readText();
-    } catch {
-      // Fallback to stored copiedText if clipboard read fails or permission denied
+    // Prefer in-memory copy (reliable) over phone clipboard read (can return
+    // stale/truncated data on mobile Safari when the clipboard write silently fails).
+    if (copiedText) {
       textToPaste = copiedText;
+    } else {
+      // No in-app copy — try phone clipboard (user copied from Safari, Notes, etc)
+      try {
+        textToPaste = await navigator.clipboard.readText();
+      } catch {
+        // Permission denied or unavailable — nothing to paste
+      }
     }
 
     if (textToPaste) {
@@ -627,8 +637,8 @@ export default function SessionPage() {
         )
       )}
 
-      {/* ── Extraction (Copy) toast — trackpad mode only ──────────────────── */}
-      {mode === "trackpad" && extractionToast && (
+      {/* ── Extraction (Copy) toast — both modes ─────────────────────────── */}
+      {extractionToast && (
         <>
           {/* Invisible fullscreen overlay — tap outside = dismiss */}
           <div
@@ -636,20 +646,59 @@ export default function SessionPage() {
             onTouchEnd={(e) => { e.stopPropagation(); dismissToast(); }}
             onClick={() => dismissToast()}
           />
-          {/* Copy toast — straddles trackpad border */}
+          {/* Copy toast — trackpad: straddles border, voice: below paste button */}
           <div
-            className="absolute z-30"
-            style={copyToastPosition}
+            className={`absolute z-30 flex flex-col gap-2 ${
+              mode !== "trackpad"
+                ? isLandscape
+                  ? "top-[8.5rem] left-4"
+                  : "top-16 right-4"
+                : ""
+            }`}
+            style={mode === "trackpad" ? copyToastPosition : undefined}
           >
             <button
               type="button"
               onTouchEnd={(e) => { e.stopPropagation(); handleCopy(); }}
               onClick={handleCopy}
-              className="rounded-2xl bg-white px-6 py-3 text-sm font-semibold text-black shadow-xl active:scale-95"
+              disabled={copiedConfirm}
+              className={`rounded-2xl px-6 py-3 text-sm font-semibold shadow-xl transition-all duration-300 ${
+                copiedConfirm
+                  ? "bg-green-500 text-white scale-95 opacity-0"
+                  : "bg-white text-black active:scale-95"
+              }`}
               style={{ minWidth: 100, minHeight: 48 }}
             >
-              {fetchedText ? "Copy" : "..."}
+              {copiedConfirm ? "✓" : fetchedText ? "Copy" : "..."}
             </button>
+            {/* Select All — voice mode only, below Copy */}
+            {mode !== "trackpad" && !copiedConfirm && (
+              <button
+                type="button"
+                onTouchEnd={(e) => {
+                  e.stopPropagation();
+                  sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "a"] } });
+                  // Reset timer so user has time to tap Copy after Select All
+                  if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+                  toastTimerRef.current = setTimeout(() => {
+                    setExtractionToast(false);
+                    setFetchedText("");
+                  }, TOAST_DISMISS_MS);
+                }}
+                onClick={() => {
+                  sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "a"] } });
+                  if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+                  toastTimerRef.current = setTimeout(() => {
+                    setExtractionToast(false);
+                    setFetchedText("");
+                  }, TOAST_DISMISS_MS);
+                }}
+                className="rounded-2xl bg-white/80 px-6 py-3 text-sm font-medium text-black shadow-lg backdrop-blur active:scale-95"
+                style={{ minWidth: 100, minHeight: 48 }}
+              >
+                Select All
+              </button>
+            )}
           </div>
         </>
       )}

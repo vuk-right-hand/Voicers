@@ -2,7 +2,10 @@
 
 import { useState, useRef, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
+import QRCode from "react-qr-code";
 import type { SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
+
+type AuthProvider = "email" | "github" | "google";
 
 type Screen = "auth" | "waiting" | "linking";
 
@@ -16,6 +19,7 @@ export default function LoginPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [screen, setScreen] = useState<Screen>("auth");
   const [resendStatus, setResendStatus] = useState<string>("idle");
+  const [authProvider, setAuthProvider] = useState<AuthProvider>("email");
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -78,6 +82,14 @@ export default function LoginPage() {
       return; // skip regular flow & cleanup — no subscription to unsubscribe
     }
 
+    // ─── Handle ?error from failed OAuth callback ──────────────────────────
+    const searchParams = new URLSearchParams(window.location.search);
+    const authError = searchParams.get("error");
+    if (authError) {
+      setError("Authentication failed. Please try again.");
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+
     // ─── DEVICE A: regular session detection ──────────────────────────────
     let handled = false;
 
@@ -94,6 +106,12 @@ export default function LoginPage() {
       if (session.user.user_metadata?.device_b_linked_at) {
         window.location.replace("/dashboard");
         return;
+      }
+
+      // Detect auth provider from session metadata
+      const provider = session.user.app_metadata?.provider as string | undefined;
+      if (provider === "github" || provider === "google") {
+        setAuthProvider(provider);
       }
 
       // Unlinked session → waiting room
@@ -246,12 +264,15 @@ export default function LoginPage() {
 
   if (screen === "waiting") {
     const isMobile = typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const isOAuth = authProvider === "github" || authProvider === "google";
+    const siteUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://voicers.vercel.app";
+    const qrUrl = `${siteUrl}/verify?p=${authProvider}`;
 
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-black p-6 text-white">
         <h1 className="text-3xl font-bold">Voicer</h1>
 
-        <div className="relative flex w-full max-w-sm flex-col gap-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+        <div className="relative flex w-full max-w-sm flex-col items-center gap-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
           <button
             onClick={() => setScreen("auth")}
             className="absolute right-4 top-4 flex h-7 w-7 items-center justify-center rounded-full text-zinc-600 hover:text-zinc-300"
@@ -262,14 +283,25 @@ export default function LoginPage() {
             </svg>
           </button>
 
-          <div className="flex flex-col gap-2 pr-6">
-            <p className="font-semibold text-white">Check your email</p>
+          <div className="flex flex-col gap-2 text-center">
+            <p className="font-semibold text-white">Connect your other device</p>
             <p className="text-sm text-zinc-400 leading-relaxed">
-              {isMobile
-                ? "We've sent a link to your inbox. Open it on your desktop to connect your devices. Check spam too."
-                : "We've sent a link to your inbox. Open it on your phone to connect your devices. Check spam too."}
+              {isOAuth
+                ? isMobile
+                  ? "Scan the QR code on your desktop or check your inbox for a connection link."
+                  : "Scan the QR code on your phone or check your inbox for a connection link."
+                : isMobile
+                  ? "Check your inbox on your desktop for a connection link."
+                  : "Check your inbox on your phone for a connection link."}
             </p>
           </div>
+
+          {/* QR code — only for OAuth users (points to /verify?p=github|google) */}
+          {isOAuth && (
+            <div className="rounded-xl bg-white p-3 inline-block">
+              <QRCode value={qrUrl} size={180} />
+            </div>
+          )}
 
           <p className="animate-pulse text-center text-xs text-zinc-600">
             Waiting for the other device to connect…
