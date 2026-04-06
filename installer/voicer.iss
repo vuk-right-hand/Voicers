@@ -42,15 +42,15 @@ Source: "bundle\start_voicer.bat"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{group}\Start Voicer Host"; Filename: "{app}\start_voicer.bat"; WorkingDir: "{app}\host"
 Name: "{group}\Uninstall Voicer"; Filename: "{uninstallexe}"
 
+[Registry]
+; Auto-start on user logon via Registry Run key (no admin needed)
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "VoicerHost"; ValueData: """{app}\start_voicer.bat"""; Flags: uninsdeletevalue
+
 [Run]
-; Register auto-start via Task Scheduler (runs minimized on logon)
-Filename: "schtasks.exe"; Parameters: "/create /tn ""VoicerHost"" /tr ""\\""{app}\start_voicer.bat\\"""" /sc onlogon /rl limited /f"; Flags: runhidden waituntilterminated
 ; Start the host immediately after install
 Filename: "{app}\start_voicer.bat"; Description: "Start Voicer Host now"; Flags: nowait postinstall skipifsilent runminimized
 
 [UninstallRun]
-; Remove the scheduled task on uninstall
-Filename: "schtasks.exe"; Parameters: "/delete /tn ""VoicerHost"" /f"; Flags: runhidden waituntilterminated
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\host\__pycache__"

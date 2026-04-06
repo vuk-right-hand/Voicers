@@ -1,6 +1,11 @@
 @echo off
-:: Voicer Desktop Host — launched on boot via Task Scheduler
+:: Voicer Desktop Host — launched on boot via Registry Run key
 :: Logs to voicer.log in the install directory for diagnostics.
+:: Minimize window immediately so it doesn't flash on boot.
+if not "%1"=="min" (
+    start /min "" "%~f0" min
+    exit /b
+)
 
 cd /d "%~dp0host"
 echo [%date% %time%] Starting Voicer Host... >> "%~dp0voicer.log"
