@@ -95,8 +95,9 @@ for %%f in (server.py webrtc_host.py screen.py input.py gemini_live.py supabase_
     echo USE_HOSTED_API=false
 ) > "%BUNDLE%\host\.env.template"
 
-:: Copy start script
+:: Copy start scripts
 copy /y "start_voicer.bat" "%BUNDLE%\start_voicer.bat" >nul
+copy /y "start_voicer.vbs" "%BUNDLE%\start_voicer.vbs" >nul
 
 :: ─── Step 6: Compile installer ──────────────────────────────────────────────
 echo [6/6] Compiling installer with Inno Setup...

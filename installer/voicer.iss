@@ -35,8 +35,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "bundle\python\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Host application files
 Source: "bundle\host\*"; DestDir: "{app}\host"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Start script
+; Start scripts
 Source: "bundle\start_voicer.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bundle\start_voicer.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Start Voicer Host"; Filename: "{app}\start_voicer.bat"; WorkingDir: "{app}\host"
@@ -44,7 +45,7 @@ Name: "{group}\Uninstall Voicer"; Filename: "{uninstallexe}"
 
 [Registry]
 ; Auto-start on user logon via Registry Run key (no admin needed)
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "VoicerHost"; ValueData: """{app}\start_voicer.bat"""; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "VoicerHost"; ValueData: "wscript.exe ""{app}\start_voicer.vbs"""; Flags: uninsdeletevalue
 
 [Run]
 ; Start the host immediately after install
