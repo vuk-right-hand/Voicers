@@ -554,6 +554,8 @@ export default function LandingPage() {
               GitHub
             </a>
             <a href="#pricing" className="hover:text-white transition-colors">Pricing</a>
+            <Link href="/privacy" className="hover:text-white transition-colors">Privacy</Link>
+            <Link href="/tos" className="hover:text-white transition-colors">Terms</Link>
             <Link href="/login" className="hover:text-white transition-colors">Sign in</Link>
           </div>
         </div>

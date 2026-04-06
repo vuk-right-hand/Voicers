@@ -450,6 +450,12 @@ export default function LoginPage() {
           {isSignUp ? "Already have an account? Sign in" : "Need an account? Sign up"}
         </button>
       </form>
+
+      <div className="flex items-center gap-4 text-xs text-zinc-600">
+        <a href="/privacy" className="hover:text-zinc-400 transition-colors">Privacy Policy</a>
+        <span className="text-zinc-800">|</span>
+        <a href="/tos" className="hover:text-zinc-400 transition-colors">Terms of Service</a>
+      </div>
     </main>
   );
 }
