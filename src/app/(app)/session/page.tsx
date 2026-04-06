@@ -163,6 +163,24 @@ export default function SessionPage() {
     }, 600);
   };
 
+  const handleSelectAll = async () => {
+    // Select All on PC, then re-copy so fetchedText has the full selection
+    sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "a"] } });
+    await new Promise((r) => setTimeout(r, 200)); // let selection land
+    setFetchedText("");
+    sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "c"] } });
+    await new Promise((r) => setTimeout(r, 150));
+    sendCommand({ type: "get-clipboard" });
+    const text = await awaitClipboard();
+    setFetchedText(text);
+    // Reset dismiss timer so user has time to tap Copy
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setExtractionToast(false);
+      setFetchedText("");
+    }, TOAST_DISMISS_MS);
+  };
+
   const handlePaste = async () => {
     let textToPaste = "";
 
@@ -675,24 +693,8 @@ export default function SessionPage() {
             {mode !== "trackpad" && !copiedConfirm && (
               <button
                 type="button"
-                onTouchEnd={(e) => {
-                  e.stopPropagation();
-                  sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "a"] } });
-                  // Reset timer so user has time to tap Copy after Select All
-                  if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-                  toastTimerRef.current = setTimeout(() => {
-                    setExtractionToast(false);
-                    setFetchedText("");
-                  }, TOAST_DISMISS_MS);
-                }}
-                onClick={() => {
-                  sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "a"] } });
-                  if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-                  toastTimerRef.current = setTimeout(() => {
-                    setExtractionToast(false);
-                    setFetchedText("");
-                  }, TOAST_DISMISS_MS);
-                }}
+                onTouchEnd={(e) => { e.stopPropagation(); handleSelectAll(); }}
+                onClick={handleSelectAll}
                 className="rounded-2xl bg-white/80 px-6 py-3 text-sm font-medium text-black shadow-lg backdrop-blur active:scale-95"
                 style={{ minWidth: 100, minHeight: 48 }}
               >
