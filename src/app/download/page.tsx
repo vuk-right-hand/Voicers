@@ -1,0 +1,206 @@
+"use client";
+
+import { useEffect, useState, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import JSZip from "jszip";
+
+const INSTALLER_URL =
+  process.env.NEXT_PUBLIC_INSTALLER_URL ??
+  "https://github.com/vuk-right-hand/Voicers/releases/latest/download/VoicerSetup.exe";
+
+type Stage = "validating" | "downloading" | "bundling" | "done" | "error" | "mobile";
+
+function isMobileUA(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
+    navigator.userAgent
+  );
+}
+
+function DownloadFlow() {
+  const searchParams = useSearchParams();
+  const uid = searchParams.get("uid");
+  const startedRef = useRef(false);
+
+  const [stage, setStage] = useState<Stage>("validating");
+  const [progress, setProgress] = useState(0); // 0-100
+  const [errorMsg, setErrorMsg] = useState("");
+
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isValid = uid && uuidRegex.test(uid);
+
+  useEffect(() => {
+    if (startedRef.current) return;
+    if (!isValid) {
+      setStage("error");
+      setErrorMsg("Invalid or missing download link. Check your email for the correct URL.");
+      return;
+    }
+    if (isMobileUA()) {
+      setStage("mobile");
+      return;
+    }
+    startedRef.current = true;
+    bundleAndDownload(uid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isValid, uid]);
+
+  async function bundleAndDownload(userId: string) {
+    try {
+      // ── Download the installer exe ────────────────────────────────
+      setStage("downloading");
+      setProgress(0);
+
+      const resp = await fetch(INSTALLER_URL);
+      if (!resp.ok) throw new Error("Download failed — please try again.");
+
+      const contentLength = Number(resp.headers.get("content-length") ?? 0);
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error("Streaming not supported");
+
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (contentLength > 0) {
+          setProgress(Math.min(95, Math.round((received / contentLength) * 95)));
+        }
+      }
+
+      // Combine chunks into a single blob
+      const exeBlob = new Blob(chunks as BlobPart[]);
+
+      // ── Bundle into zip ───────────────────────────────────────────
+      setStage("bundling");
+      setProgress(96);
+
+      const zip = new JSZip();
+      zip.file("VoicerSetup.exe", exeBlob);
+      zip.file("voicer-activation.txt", userId);
+
+      setProgress(98);
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      setProgress(100);
+
+      // ── Auto-trigger download ─────────────────────────────────────
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "VoicerInstaller.zip";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      setStage("done");
+    } catch (err) {
+      setStage("error");
+      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+    }
+  }
+
+  return (
+    <div className="flex w-full max-w-md flex-col items-center gap-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-8">
+      {stage === "mobile" ? (
+        <>
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-yellow-500/20">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#eab308" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+              <line x1="12" y1="18" x2="12.01" y2="18" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <p className="font-semibold">Open this link on your PC</p>
+            <p className="mt-2 text-sm text-zinc-400">
+              Voicer installs on Windows. Open this same link in a browser on the computer you want to control.
+            </p>
+            <p className="mt-4 text-xs text-zinc-600">
+              Tip: copy the link from your email and paste it on your PC.
+            </p>
+          </div>
+        </>
+      ) : stage === "error" ? (
+        <>
+          <p className="text-center text-red-400">{errorMsg}</p>
+          <a
+            href="/login"
+            className="text-sm text-zinc-500 hover:text-zinc-300"
+          >
+            Back to sign in
+          </a>
+        </>
+      ) : stage === "done" ? (
+        <>
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-500/20">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <p className="font-semibold">Download started</p>
+            <p className="mt-2 text-sm text-zinc-400">
+              Unzip the file and run <strong className="text-white">VoicerSetup.exe</strong>.
+            </p>
+            <p className="mt-1 text-sm text-zinc-400">
+              Keep both files in the same folder.
+            </p>
+          </div>
+          <p className="text-xs text-zinc-600 text-center">
+            macOS installer coming soon.
+          </p>
+          <button
+            type="button"
+            onClick={() => bundleAndDownload(uid!)}
+            className="text-sm text-zinc-500 hover:text-zinc-300"
+          >
+            Download didn&apos;t start? Click here
+          </button>
+        </>
+      ) : (
+        <>
+          <p className="font-semibold">
+            {stage === "validating" && "Preparing..."}
+            {stage === "downloading" && "Downloading installer..."}
+            {stage === "bundling" && "Bundling your installer..."}
+          </p>
+
+          {/* Progress bar */}
+          <div className="w-full rounded-full bg-zinc-800 h-2 overflow-hidden">
+            <div
+              className="h-full bg-white rounded-full transition-all duration-300"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+
+          <p className="text-xs text-zinc-600">
+            {stage === "downloading"
+              ? `${progress}% — this may take a moment on slower connections`
+              : "Almost there..."}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function DownloadPage() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-black p-6 text-white">
+      <h1 className="text-3xl font-bold">Voicer</h1>
+      <Suspense
+        fallback={
+          <div className="flex w-full max-w-md flex-col items-center gap-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-8">
+            <p className="font-semibold">Preparing...</p>
+          </div>
+        }
+      >
+        <DownloadFlow />
+      </Suspense>
+    </main>
+  );
+}
