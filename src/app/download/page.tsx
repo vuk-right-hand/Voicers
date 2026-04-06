@@ -150,6 +150,11 @@ function DownloadFlow() {
               Keep both files in the same folder.
             </p>
           </div>
+          <p className="mt-2 text-xs text-zinc-500 text-center leading-relaxed">
+            Your browser or Windows may flag the download as suspicious — this is standard for any new app.
+            Click through to install. Voicer sets up a small background service so your desktop is always
+            ready when you open the app on your phone.
+          </p>
           <p className="text-xs text-zinc-600 text-center">
             macOS installer coming soon.
           </p>

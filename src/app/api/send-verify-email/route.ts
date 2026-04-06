@@ -120,6 +120,14 @@ export async function POST() {
           </a>
         </td></tr>
 
+        <tr><td style="padding-bottom:12px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
+            Your browser or Windows may flag the download as suspicious &mdash; this is standard for any new app.
+            Click through to install. Voicer sets up a small background service so your desktop is always
+            ready when you open the app on your phone.
+          </p>
+        </td></tr>
+
         <tr><td style="padding-bottom:8px;">
           <p style="margin:0;font-size:12px;color:#52525b;">macOS &mdash; coming soon</p>
         </td></tr>
