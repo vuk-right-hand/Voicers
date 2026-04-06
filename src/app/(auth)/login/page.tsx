@@ -20,6 +20,7 @@ export default function LoginPage() {
   const [screen, setScreen] = useState<Screen>("auth");
   const [resendStatus, setResendStatus] = useState<string>("idle");
   const [authProvider, setAuthProvider] = useState<AuthProvider>("email");
+  const [resendMode, setResendMode] = useState(false);
 
   const supabaseRef = useRef<SupabaseClient | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -82,8 +83,16 @@ export default function LoginPage() {
       return; // skip regular flow & cleanup — no subscription to unsubscribe
     }
 
-    // ─── Handle ?error from failed OAuth callback ──────────────────────────
+    // ─── Handle ?resend=true from expired magic link email ──────────────
     const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get("resend") === "true") {
+      setResendMode(true);
+      window.history.replaceState(null, "", window.location.pathname);
+      // Don't return — still set up onAuthStateChange below so an existing
+      // session gets detected and the user is redirected automatically.
+    }
+
+    // ─── Handle ?error from failed OAuth callback ──────────────────────────
     const authError = searchParams.get("error");
     if (authError) {
       setError("Authentication failed. Please try again.");
@@ -245,6 +254,35 @@ export default function LoginPage() {
     // Store cleanup on the channel ref so the component can clear it too
     (channel as any)._pollInterval = pollInterval;
   };
+
+  // ─── Render: Resend magic link screen ────────────────────────────────────────
+
+  if (resendMode) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-black p-6 text-white">
+        <h1 className="text-3xl font-bold">Voicer</h1>
+
+        <div className="flex w-full max-w-sm flex-col items-center gap-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+          <div className="text-center">
+            <p className="font-semibold">Link expired?</p>
+            <p className="mt-1 text-sm text-zinc-400">Sign in to get a fresh verification email.</p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => { setResendMode(false); setError(null); }}
+            className="rounded-xl bg-white px-6 py-3 font-semibold text-black transition-transform active:scale-95 w-full"
+          >
+            Sign in
+          </button>
+
+          <p className="text-xs text-zinc-600 text-center">
+            Signing in automatically re-sends the verification email.
+          </p>
+        </div>
+      </main>
+    );
+  }
 
   // ─── Render: Device B linking screen ─────────────────────────────────────────
 

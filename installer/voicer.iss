@@ -151,6 +151,27 @@ begin
     Lines.Add(Key + '=' + Value);
 end;
 
+function ReadActivationFile: string;
+var
+  ActivationPath: string;
+  ActivationLines: TStringList;
+begin
+  Result := '';
+  // Look for voicer-activation.txt next to the setup exe
+  ActivationPath := ExtractFilePath(ExpandConstant('{srcexe}')) + 'voicer-activation.txt';
+  if FileExists(ActivationPath) then
+  begin
+    ActivationLines := TStringList.Create;
+    try
+      ActivationLines.LoadFromFile(ActivationPath);
+      if ActivationLines.Count > 0 then
+        Result := Trim(ActivationLines[0]);
+    finally
+      ActivationLines.Free;
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   EnvFile: string;
@@ -159,12 +180,16 @@ var
   UseHosted: string;
   ServiceRoleKey: string;
   SupabaseUrl: string;
+  UserId: string;
 begin
   if CurStep = ssPostInstall then
   begin
     // Read values baked into the template at build time
     ServiceRoleKey := ReadKeyFromTemplate('SUPABASE_SERVICE_ROLE_KEY');
     SupabaseUrl := ReadKeyFromTemplate('SUPABASE_URL');
+
+    // Read USER_ID from activation file (downloaded alongside the installer)
+    UserId := ReadActivationFile;
 
     EnvFile := ExpandConstant('{app}\host\.env');
     Lines := TStringList.Create;
@@ -175,6 +200,9 @@ begin
         Lines.LoadFromFile(EnvFile);
         UpdateEnvKey(Lines, 'SUPABASE_URL', SupabaseUrl);
         UpdateEnvKey(Lines, 'SUPABASE_SERVICE_ROLE_KEY', ServiceRoleKey);
+        // Update USER_ID only if activation file provided a value
+        if UserId <> '' then
+          UpdateEnvKey(Lines, 'USER_ID', UserId);
       end
       else
       begin
@@ -184,7 +212,7 @@ begin
         Lines.Add('');
         Lines.Add('SUPABASE_URL=' + SupabaseUrl);
         Lines.Add('SUPABASE_SERVICE_ROLE_KEY=' + ServiceRoleKey);
-        Lines.Add('USER_ID=');
+        Lines.Add('USER_ID=' + UserId);
         Lines.Add('');
 
         if PlanPage.SelectedValueIndex = 0 then

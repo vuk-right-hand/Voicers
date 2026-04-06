@@ -47,6 +47,11 @@ export async function POST() {
 
   const magicLink = linkData.properties.action_link;
 
+  // ── Personalized installer links ──────────────────────────────────────────
+  const installerUrl = "https://github.com/vuk-right-hand/Voicers/releases/latest/download/VoicerSetup.exe";
+  const activationUrl = `${siteUrl}/api/download?uid=${user.id}`;
+  const resendUrl = `${siteUrl}/login?resend=true`;
+
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -58,7 +63,7 @@ export async function POST() {
       // e.g. "Voicer <noreply@yourdomain.com>"
       from: process.env.RESEND_FROM_EMAIL ?? "Voicer <onboarding@resend.dev>",
       to: user.email,
-      subject: "Connect your devices — Voicer",
+      subject: "Welcome to Voicer — verify + install",
       html: `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -71,27 +76,76 @@ export async function POST() {
           <p style="margin:0;font-size:24px;font-weight:700;color:#ffffff;">Voicer</p>
         </td></tr>
 
-        <tr><td style="padding-bottom:12px;">
-          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">Connect your devices</p>
+        <!-- ── Section 1: Verify account ─────────────────────────── -->
+
+        <tr><td style="padding-bottom:8px;">
+          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">1. Verify your account</p>
         </td></tr>
 
-        <tr><td style="padding-bottom:24px;">
-          <p style="margin:0;font-size:15px;line-height:1.6;color:#a1a1aa;">
-            Tap the link below to connect this device and the device you used to sign up for Voicer.
+        <tr><td style="padding-bottom:20px;">
+          <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
+            Open this link in any browser to connect your devices.
           </p>
         </td></tr>
 
-        <tr><td style="padding-bottom:40px;">
+        <tr><td style="padding-bottom:12px;">
           <a href="${magicLink}"
              style="display:inline-block;background:#ffffff;color:#000000;font-size:15px;font-weight:600;padding:14px 32px;border-radius:12px;text-decoration:none;">
-            Connect second device &rarr;
+            Verify account &rarr;
           </a>
         </td></tr>
 
+        <tr><td style="padding-bottom:32px;">
+          <p style="margin:0;font-size:12px;color:#52525b;">
+            Link expired? <a href="${resendUrl}" style="color:#a1a1aa;text-decoration:underline;">Get a new one</a>
+          </p>
+        </td></tr>
+
+        <!-- ── Divider ───────────────────────────────────────────── -->
+
+        <tr><td style="border-top:1px solid #27272a;padding-top:28px;padding-bottom:8px;">
+          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">2. Install the desktop host</p>
+        </td></tr>
+
+        <tr><td style="padding-bottom:20px;">
+          <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
+            Run this on the Windows computer you want to control.
+          </p>
+        </td></tr>
+
+        <tr><td style="padding-bottom:16px;">
+          <a href="${installerUrl}"
+             style="display:inline-block;background:#ffffff;color:#000000;font-size:15px;font-weight:600;padding:14px 32px;border-radius:12px;text-decoration:none;">
+            Download for Windows
+          </a>
+          &nbsp;&nbsp;
+          <span style="font-size:12px;color:#52525b;">macOS &mdash; coming soon</span>
+        </td></tr>
+
+        <tr><td style="padding-bottom:8px;">
+          <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
+            Then download your personal activation file and place it in the <strong style="color:#ffffff;">same folder</strong> as the installer before running it:
+          </p>
+        </td></tr>
+
+        <tr><td style="padding-bottom:8px;">
+          <a href="${activationUrl}"
+             style="display:inline-block;background:#27272a;color:#ffffff;font-size:14px;font-weight:500;padding:10px 24px;border-radius:10px;text-decoration:none;border:1px solid #3f3f46;">
+            Download activation file
+          </a>
+        </td></tr>
+
+        <tr><td style="padding-bottom:32px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
+            This file contains your account ID. Do not share it with anyone.
+          </p>
+        </td></tr>
+
+        <!-- ── Footer ────────────────────────────────────────────── -->
+
         <tr><td style="border-top:1px solid #27272a;padding-top:24px;">
           <p style="margin:0;font-size:12px;line-height:1.6;color:#52525b;">
-            This link connects a device already associated with your account.<br>
-            If you didn't request this, you can safely ignore this email.
+            If you didn't sign up for Voicer, you can safely ignore this email.
           </p>
         </td></tr>
 
