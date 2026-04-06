@@ -78,7 +78,7 @@ if errorlevel 1 (
 
 :: ─── Step 5: Copy host files ────────────────────────────────────────────────
 echo [5/6] Copying host files...
-for %%f in (server.py webrtc_host.py screen.py input.py gemini_live.py supabase_client.py requirements.txt) do (
+for %%f in (server.py webrtc_host.py screen.py input.py gemini_live.py supabase_client.py clipboard_watcher.py requirements.txt) do (
     copy /y "..\host\%%f" "%BUNDLE%\host\%%f" >nul 2>&1
 )
 
