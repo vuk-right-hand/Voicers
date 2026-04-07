@@ -23,6 +23,7 @@ export default function DashboardPage() {
   const [hostReady, setHostReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
 
   // ── TURN config (BYOK, stored in localStorage) ──────────────────────────
   const [turnOpen, setTurnOpen] = useState(false);
@@ -45,15 +46,39 @@ export default function DashboardPage() {
     setTurnOpen(false);
   };
 
-  // Get authenticated user
+  // Get authenticated user + check plan
   useEffect(() => {
     const supabase = createClient();
-    supabase.auth.getUser().then(({ data: { user } }) => {
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
       if (!user) {
         router.push("/login");
         return;
       }
       setUserId(user.id);
+
+      // Check if subscription has expired (plan reverted to free)
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("plan")
+        .eq("id", user.id)
+        .single();
+
+      if (profile?.plan === "free") {
+        // Check if they ever had a subscription (lapsed vs never-subscribed)
+        const { data: sub } = await supabase
+          .from("subscriptions")
+          .select("id")
+          .eq("user_id", user.id)
+          .limit(1)
+          .single();
+
+        if (sub) {
+          // Lapsed subscriber — show resubscribe gate
+          setExpired(true);
+          setLoading(false);
+          return;
+        }
+      }
     });
   }, [router]);
 
@@ -63,28 +88,31 @@ export default function DashboardPage() {
     let channel: ReturnType<typeof subscribeToSession> | null = null;
 
     async function load() {
-      const { data } = await fetchActiveSession(userId!);
-      if (data) {
-        setSession(data);
-        const raw = data.signaling_data;
-        const sig: SignalingData | null =
-          typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
-        // Accept either signaling_data.type === "host-ready" OR pc_status === "waiting" —
-        // the host writes these in two separate DB calls so a fetch between them would
-        // miss the signaling flag but still see the status.
-        setHostReady(sig?.type === "host-ready" || data.pc_status === "waiting");
+      try {
+        const { data } = await fetchActiveSession(userId!);
+        if (data) {
+          setSession(data);
+          const raw = data.signaling_data;
+          const sig: SignalingData | null =
+            typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
+          // Accept either signaling_data.type === "host-ready" OR pc_status === "waiting" —
+          // the host writes these in two separate DB calls so a fetch between them would
+          // miss the signaling flag but still see the status.
+          setHostReady(sig?.type === "host-ready" || data.pc_status === "waiting");
 
-        // Subscribe for live updates
-        channel = subscribeToSession(
-          data.id,
-          (sigData) => setHostReady(sigData.type === "host-ready"),
-          (status) => {
-            if (status === "waiting") setHostReady(true);
-            else if (status === "offline") setHostReady(false);
-          },
-        );
+          // Subscribe for live updates
+          channel = subscribeToSession(
+            data.id,
+            (sigData) => setHostReady(sigData.type === "host-ready"),
+            (status) => {
+              if (status === "waiting") setHostReady(true);
+              else if (status === "offline") setHostReady(false);
+            },
+          );
+        }
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     }
 
     load();
@@ -114,6 +142,30 @@ export default function DashboardPage() {
 
 
   const isConnecting = transportStatus === "signaling" || transportStatus === "connecting";
+
+  // ─── Expired subscription gate ────────────────────────────────────────────────
+  if (expired) {
+    return (
+      <main className="flex flex-1 flex-col items-center justify-center gap-6 p-6 text-center">
+        <h1 className="text-3xl font-bold tracking-tight">Voicer</h1>
+        <p className="text-zinc-400 max-w-xs leading-relaxed">
+          Your subscription has ended. Resubscribe to reconnect to your rig.
+        </p>
+        <a
+          href="/#pricing"
+          className="rounded-2xl bg-white px-8 py-4 text-lg font-semibold text-black transition-transform active:scale-95"
+        >
+          View plans
+        </a>
+        <a
+          href="/settings"
+          className="text-sm text-zinc-600 hover:text-zinc-400"
+        >
+          Manage account
+        </a>
+      </main>
+    );
+  }
 
   // ─── Desktop view ─────────────────────────────────────────────────────────────
   if (isDesktop) {

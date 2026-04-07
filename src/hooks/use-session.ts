@@ -167,6 +167,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
       },
       iceServers,
+      // onRejected — host rejected connection (subscription expired)
+      () => {
+        _close = null;
+        set({ transportStatus: "rejected", mediaStream: null, dataChannel: null });
+      },
     );
 
     // Store the pc for ICE restart on app resume

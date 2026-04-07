@@ -27,7 +27,8 @@ export type SignalingData =
   | { type: "host-ready"; host_id: string }
   | { type: "offer"; sdp: string; from: "phone" }
   | { type: "answer"; sdp: string; from: "host" }
-  | { type: "ice-candidate"; candidate: string; from: "host" | "phone" };
+  | { type: "ice-candidate"; candidate: string; from: "host" | "phone" }
+  | { type: "rejected"; reason: string };
 
 // Phone → Host (via data channel)
 export type PhoneCommand =
@@ -57,7 +58,7 @@ export type HostMessage =
   | { type: "clipboard-push"; text: string };
 // Note: binary ArrayBuffer (raw MP3 TTS) is also sent but not typed here
 
-export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "reconnecting" | "failed";
+export type TransportStatus = "idle" | "signaling" | "connecting" | "connected" | "reconnecting" | "failed" | "rejected";
 
 export interface Subscription {
   id: string;

@@ -225,8 +225,12 @@ export default function SessionPage() {
     }
   }, [mediaStream, isPocketMode]);
 
-  // Redirect to dashboard if not connected
+  // Redirect to dashboard if not connected or rejected
   useEffect(() => {
+    if (transportStatus === "rejected") {
+      router.replace("/dashboard");
+      return;
+    }
     if (transportStatus === "idle" && !mediaStream) {
       const t = setTimeout(() => {
         if (useSessionStore.getState().transportStatus === "idle") {
@@ -366,7 +370,9 @@ export default function SessionPage() {
           ? "Reconnecting..."
           : transportStatus === "failed"
             ? "Connection failed"
-            : null;
+            : transportStatus === "rejected"
+              ? "Subscription expired"
+              : null;
 
   // ─── Copy toast position — straddles top/left edge of trackpad ──────────
   // Portrait: bottom 25% is trackpad top edge → toast straddles it (50% in, 50% out)

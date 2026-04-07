@@ -201,6 +201,14 @@ class WebRTCHost:
         except Exception:
             logger.warning("Plan recheck failed, keeping: %s", self._user_plan)
 
+        if self._user_plan == "free":
+            logger.warning("Rejecting connection — plan is free")
+            await write_signaling_async(self.session_id, {
+                "type": "rejected",
+                "reason": "subscription_expired",
+            })
+            return
+
         # Clean up any previous connection
         if self.pc:
             await self.pc.close()
@@ -346,16 +354,9 @@ class WebRTCHost:
                     channel.send(json.dumps({"type": "error", "message": result}))
 
             elif cmd_type == "voice-start":
-                # Plan enforcement: free users can't use voice
-                if self._user_plan == "free":
-                    channel.send(json.dumps({
-                        "type": "error",
-                        "message": "Voice requires a paid plan. Upgrade at voicers.vercel.app/settings",
-                    }))
-                else:
-                    self._voice_mode = data.get("mode", "dictation")
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._start_voice(channel))
+                self._voice_mode = data.get("mode", "dictation")
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._start_voice(channel))
 
             elif cmd_type == "voice-stop":
                 loop = asyncio.get_running_loop()

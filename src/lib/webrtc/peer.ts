@@ -59,6 +59,7 @@ export function initiateCall(
   onDataChannel: (dc: RTCDataChannel) => void,
   onStateChange: (state: RTCPeerConnectionState) => void,
   iceServers: RTCIceServer[] = FALLBACK_ICE,
+  onRejected?: (reason: string) => void,
 ): { pc: RTCPeerConnection; close: () => void } {
   const pc = new RTCPeerConnection({ iceServers });
   const iceQueue: RTCIceCandidateInit[] = [];
@@ -97,6 +98,15 @@ export function initiateCall(
   // 6. Subscribe to signaling for answer + host ICE candidates
   //    Use unique suffix so dashboard cleanup doesn't kill this subscription
   channel = subscribeToSession(sessionId, async (data: SignalingData) => {
+    if (data.type === "rejected") {
+      channel?.unsubscribe();
+      channel = null;
+      dataChannel.close();
+      pc.close();
+      onRejected?.(data.reason);
+      return;
+    }
+
     if (data.type === "answer" && data.from === "host") {
       const answer = new RTCSessionDescription({ type: "answer", sdp: data.sdp });
       await pc.setRemoteDescription(answer);
