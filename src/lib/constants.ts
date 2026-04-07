@@ -8,8 +8,6 @@ export const PLANS = {
   pro: { name: "Pro", price: 9 },
 } as const;
 
-export type PlanId = keyof typeof PLANS;
-
 /** Hold duration (ms) to trigger sniper zoom */
 export const SNIPER_ZOOM_HOLD_MS = 200;
 
