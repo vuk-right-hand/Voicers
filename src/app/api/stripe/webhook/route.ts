@@ -11,6 +11,128 @@ function getAdmin() {
   );
 }
 
+async function sendPostCheckoutEmail(userId: string) {
+  const admin = getAdmin();
+
+  // Look up user email
+  const { data: { user }, error } = await admin.auth.admin.getUserById(userId);
+  if (error || !user?.email) {
+    console.error("webhook: could not look up user for email", userId, error);
+    return;
+  }
+
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://voicers.vercel.app";
+
+  // Generate magic link for device B verification
+  const { data: linkData, error: linkError } = await admin.auth.admin.generateLink({
+    type: "magiclink",
+    email: user.email,
+    options: { redirectTo: `${siteUrl}/login` },
+  });
+
+  if (linkError || !linkData.properties?.action_link) {
+    console.error("webhook: generateLink error", linkError);
+    return;
+  }
+
+  const magicLink = linkData.properties.action_link;
+  // Fetch plan to pass in URL — download page can't read profiles via RLS (user is unauthenticated)
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("plan")
+    .eq("id", userId)
+    .single();
+  const plan = profile?.plan ?? "free";
+  const downloadUrl = `${siteUrl}/download?uid=${userId}&plan=${plan}`;
+  const resendUrl = `${siteUrl}/login?resend=true`;
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: process.env.RESEND_FROM_EMAIL ?? "Voicer <onboarding@resend.dev>",
+      to: user.email,
+      subject: "Welcome to Voicer — verify + install",
+      html: `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#000000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#000000;padding:48px 24px;">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;">
+        <tr><td style="padding-bottom:32px;">
+          <p style="margin:0;font-size:24px;font-weight:700;color:#ffffff;">Voicer</p>
+        </td></tr>
+        <tr><td style="padding-bottom:8px;">
+          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">1. Verify your account</p>
+        </td></tr>
+        <tr><td style="padding-bottom:20px;">
+          <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
+            Open this link in any browser to connect your devices.
+          </p>
+        </td></tr>
+        <tr><td style="padding-bottom:12px;">
+          <a href="${magicLink}"
+             style="display:inline-block;background:#ffffff;color:#000000;font-size:15px;font-weight:600;padding:14px 32px;border-radius:12px;text-decoration:none;">
+            Verify account &rarr;
+          </a>
+        </td></tr>
+        <tr><td style="padding-bottom:32px;">
+          <p style="margin:0;font-size:12px;color:#52525b;">
+            Link expired? <a href="${resendUrl}" style="color:#a1a1aa;text-decoration:underline;">Get a new one</a>
+          </p>
+        </td></tr>
+        <tr><td style="border-top:1px solid #27272a;padding-top:28px;padding-bottom:8px;">
+          <p style="margin:0;font-size:18px;font-weight:600;color:#ffffff;">2. Install the desktop host</p>
+        </td></tr>
+        <tr><td style="padding-bottom:20px;">
+          <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
+            Open this link on the Windows machine you want to control.<br>
+            Your installer will download automatically.
+          </p>
+        </td></tr>
+        <tr><td style="padding-bottom:12px;">
+          <a href="${downloadUrl}"
+             style="display:inline-block;background:#ffffff;color:#000000;font-size:15px;font-weight:600;padding:14px 32px;border-radius:12px;text-decoration:none;">
+            Download for Windows
+          </a>
+        </td></tr>
+        <tr><td style="padding-bottom:12px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
+            Your browser or Windows may flag the download as suspicious &mdash; this is standard for any new app.
+            Click through to install. Voicer sets up a small background service so your desktop is always
+            ready when you open the app on your phone.
+          </p>
+        </td></tr>
+        <tr><td style="padding-bottom:8px;">
+          <p style="margin:0;font-size:12px;color:#52525b;">macOS &mdash; coming soon</p>
+        </td></tr>
+        <tr><td style="padding-bottom:32px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
+            This link is personal to your account. Do not share it.
+          </p>
+        </td></tr>
+        <tr><td style="border-top:1px solid #27272a;padding-top:24px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#52525b;">
+            If you didn't sign up for Voicer, you can safely ignore this email.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("webhook: Resend error", await res.text());
+  }
+}
+
 function priceIdToPlan(priceId: string): PlanId {
   if (priceId === process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO) return "pro";
   if (priceId === process.env.NEXT_PUBLIC_STRIPE_PRICE_BYOK) return "byok";
@@ -144,6 +266,11 @@ export async function POST(req: Request) {
         const subscription = await stripe.subscriptions.retrieve(session.subscription as string);
         // Pass supabase_user_id from checkout metadata as fallback for race condition
         success = await upsertSubscription(subscription, session.metadata?.supabase_user_id);
+
+        // Send verify + download email now that payment is confirmed
+        if (success && session.metadata?.supabase_user_id) {
+          await sendPostCheckoutEmail(session.metadata.supabase_user_id);
+        }
       }
       break;
     }

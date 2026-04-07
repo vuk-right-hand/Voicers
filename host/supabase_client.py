@@ -35,6 +35,23 @@ _headers = {
 }
 
 
+def get_user_plan() -> str:
+    """Fetch the user's plan from Supabase profiles table."""
+    resp = httpx.get(
+        f"{REST_URL}/profiles?id=eq.{USER_ID}&select=plan",
+        headers=_headers,
+    )
+    resp.raise_for_status()
+    rows = resp.json()
+    if rows:
+        return rows[0].get("plan", "free")
+    return "free"
+
+
+async def get_user_plan_async() -> str:
+    return await asyncio.to_thread(get_user_plan)
+
+
 def upsert_session() -> str:
     """Create or update the session row. Returns session ID."""
     # Delete any stale sessions for this user

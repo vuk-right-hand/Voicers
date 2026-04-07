@@ -428,44 +428,63 @@ export default function LandingPage() {
           <div className="text-center mb-16">
             <p className="text-xs uppercase tracking-[0.2em] text-zinc-600 mb-3">Pricing</p>
             <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-white mb-4">
-              Two plans. Zero feature-gating.
+              Three plans. Zero feature-gating.
             </h2>
             <p className="text-zinc-500 text-sm max-w-lg mx-auto">
-              Both plans. Every feature. Full access.
+              Every plan. Every feature. Full access.
               <br />
               No &ldquo;Pro tier&rdquo; unlocks. No &ldquo;upgrade to get clipboard sync.&rdquo;
               <br />
-              You pay, you get the whole thing.
+              You pay, you get the whole thing. Or self-host for free.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl mx-auto">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-3xl mx-auto">
+            {/* Free Dev */}
+            <div className="rounded-2xl border border-white/[0.06] bg-zinc-950 p-8 flex flex-col">
+              <div className="mb-6">
+                <h3 className="text-lg font-semibold text-white mb-1">Free Dev</h3>
+                <p className="text-sm text-zinc-500">Self-hosted, full control</p>
+              </div>
+              <div className="mb-6">
+                <span className="text-4xl font-bold text-white">$0</span>
+                <span className="text-zinc-500 ml-1">/mo</span>
+              </div>
+              <p className="text-sm text-zinc-400 leading-relaxed mb-8 flex-1">
+                Clone the repo. Add your own TURN, Supabase, and Gemini API keys.
+                We give you the installer to get uvicorn up on boot.
+              </p>
+              <a href="https://github.com/vuk-right-hand/Voicers" target="_blank" rel="noopener noreferrer" className="block text-center py-3 rounded-full font-medium text-sm bg-white/[0.06] text-white border border-white/[0.06] hover:bg-white/[0.1] transition-all">
+                View on GitHub
+              </a>
+            </div>
+
             {/* BYOK */}
             <div className="rounded-2xl border border-white/[0.06] bg-zinc-950 p-8 flex flex-col">
               <div className="mb-6">
                 <h3 className="text-lg font-semibold text-white mb-1">BYOK</h3>
-                <p className="text-sm text-zinc-500">Bring your own API keys</p>
+                <p className="text-sm text-zinc-500">Bring your own Gemini key</p>
               </div>
               <div className="mb-6">
                 <span className="text-4xl font-bold text-white">$4</span>
                 <span className="text-zinc-500 ml-1">/mo</span>
               </div>
               <p className="text-sm text-zinc-400 leading-relaxed mb-8 flex-1">
-                Got your own API keys? Plug them in. Voicer handles the UX,
+                Got your own API key? Plug it in. Voicer handles the UX,
                 the connection, the remote cockpit. You bring the engine.
               </p>
-              <Link href="/login" className="block text-center py-3 rounded-full font-medium text-sm bg-white/[0.06] text-white border border-white/[0.06] hover:bg-white/[0.1] transition-all">
+              <Link href="/login?plan=byok" className="block text-center py-3 rounded-full font-medium text-sm bg-white/[0.06] text-white border border-white/[0.06] hover:bg-white/[0.1] transition-all">
                 Get started
               </Link>
             </div>
 
-            {/* Full Infrastructure */}
+            {/* Pro */}
             <div className="relative rounded-2xl border border-blue-500/20 p-8 flex flex-col pricing-highlight shadow-[0_0_60px_rgba(59,130,246,0.08)]">
               <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-blue-500 text-xs font-semibold text-white">
                 Popular
               </div>
               <div className="mb-6">
-                <h3 className="text-lg font-semibold text-white mb-1">Full Infrastructure</h3>
+                <h3 className="text-lg font-semibold text-white mb-1">Pro</h3>
                 <p className="text-sm text-zinc-500">Zero config, fully loaded</p>
               </div>
               <div className="mb-6">
@@ -476,8 +495,8 @@ export default function LandingPage() {
                 We handle everything. Keys, infrastructure, uptime.
                 You open the app and code. That&apos;s it.
               </p>
-              <Link href="/login" className="block text-center py-3 rounded-full font-medium text-sm bg-white text-black hover:bg-zinc-200 transition-all">
-                Go Full Infrastructure
+              <Link href="/login?plan=pro" className="block text-center py-3 rounded-full font-medium text-sm bg-white text-black hover:bg-zinc-200 transition-all">
+                Go Pro
               </Link>
             </div>
           </div>

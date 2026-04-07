@@ -1,8 +1,9 @@
 ; ─── Voicer Desktop Host Installer ────────────────────────────────────────────
 ; Inno Setup Script — bundles embedded Python + host files + auto-start
+; Plan is read from voicer-activation.txt (line 2): free, byok, or pro
 
 #define MyAppName "Voicer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Voicer"
 #define MyAppURL "https://voicers.vercel.app"
 
@@ -23,7 +24,6 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 SetupIconFile=
 UninstallDisplayName={#MyAppName} Desktop Host
-; Dark theme colors
 WizardImageFile=
 WizardSmallImageFile=
 
@@ -60,24 +60,58 @@ Type: files; Name: "{app}\host\.env"
 [Code]
 var
   GeminiPage: TInputQueryWizardPage;
-  PlanPage: TInputOptionWizardPage;
+  UserPlan: string;
+
+function ReadActivationFile: string;
+var
+  ActivationPath: string;
+  ActivationLines: TStringList;
+begin
+  Result := '';
+  // Look for voicer-activation.txt next to the setup exe
+  ActivationPath := ExtractFilePath(ExpandConstant('{srcexe}')) + 'voicer-activation.txt';
+  if FileExists(ActivationPath) then
+  begin
+    ActivationLines := TStringList.Create;
+    try
+      ActivationLines.LoadFromFile(ActivationPath);
+      if ActivationLines.Count > 0 then
+        Result := Trim(ActivationLines[0]);
+    finally
+      ActivationLines.Free;
+    end;
+  end;
+end;
+
+function ReadPlanFromActivation: string;
+var
+  ActivationPath: string;
+  ActivationLines: TStringList;
+begin
+  Result := 'free';
+  ActivationPath := ExtractFilePath(ExpandConstant('{srcexe}')) + 'voicer-activation.txt';
+  if FileExists(ActivationPath) then
+  begin
+    ActivationLines := TStringList.Create;
+    try
+      ActivationLines.LoadFromFile(ActivationPath);
+      if ActivationLines.Count > 1 then
+        Result := Trim(ActivationLines[1]);
+    finally
+      ActivationLines.Free;
+    end;
+  end;
+end;
 
 procedure InitializeWizard;
 begin
-  // ─── Plan selection page ──────────────────────────────────────────────────
-  PlanPage := CreateInputOptionPage(wpWelcome,
-    'Your Plan', 'How would you like to use Voicer?',
-    'Select your plan. If you chose BYOK ($4/mo), you''ll need a Gemini API key from Google AI Studio. ' +
-    'If you chose Pro ($9/mo), we handle everything — no key needed.',
-    True, False);
-  PlanPage.Add('Pro ($9/mo) — No API key needed');
-  PlanPage.Add('BYOK ($4/mo) — I have my own Gemini API key');
-  PlanPage.SelectedValueIndex := 0;
+  // Read plan from activation file (line 2)
+  UserPlan := ReadPlanFromActivation;
 
-  // ─── Gemini API key input page ────────────────────────────────────────────
-  GeminiPage := CreateInputQueryPage(PlanPage.ID,
+  // ─── Gemini API key input page (only shown for BYOK) ──────────────────
+  GeminiPage := CreateInputQueryPage(wpWelcome,
     'Gemini API Key', 'Paste your Google AI Studio API key',
-    'You can get a free key at https://aistudio.google.com/apikeys' + #13#10 +
+    'Get a free key at https://aistudio.google.com/apikeys' + #13#10 +
     'This key stays on your computer and is never sent to our servers.');
   GeminiPage.Add('API Key:', False);
 end;
@@ -85,8 +119,8 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  // Skip the Gemini key page if user picked Pro plan
-  if (PageID = GeminiPage.ID) and (PlanPage.SelectedValueIndex = 0) then
+  // Skip Gemini key page unless user is on BYOK plan
+  if (PageID = GeminiPage.ID) and (UserPlan <> 'byok') then
     Result := True;
 end;
 
@@ -94,7 +128,7 @@ function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
   // Validate Gemini key is not empty for BYOK
-  if (CurPageID = GeminiPage.ID) and (PlanPage.SelectedValueIndex = 1) then
+  if (CurPageID = GeminiPage.ID) and (UserPlan = 'byok') then
   begin
     if Trim(GeminiPage.Values[0]) = '' then
     begin
@@ -152,27 +186,6 @@ begin
     Lines.Add(Key + '=' + Value);
 end;
 
-function ReadActivationFile: string;
-var
-  ActivationPath: string;
-  ActivationLines: TStringList;
-begin
-  Result := '';
-  // Look for voicer-activation.txt next to the setup exe
-  ActivationPath := ExtractFilePath(ExpandConstant('{srcexe}')) + 'voicer-activation.txt';
-  if FileExists(ActivationPath) then
-  begin
-    ActivationLines := TStringList.Create;
-    try
-      ActivationLines.LoadFromFile(ActivationPath);
-      if ActivationLines.Count > 0 then
-        Result := Trim(ActivationLines[0]);
-    finally
-      ActivationLines.Free;
-    end;
-  end;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   EnvFile: string;
@@ -216,18 +229,27 @@ begin
         Lines.Add('USER_ID=' + UserId);
         Lines.Add('');
 
-        if PlanPage.SelectedValueIndex = 0 then
+        // Plan-based config: BYOK users provide their own key, Pro uses hosted API
+        if UserPlan = 'byok' then
+        begin
+          GeminiKey := Trim(GeminiPage.Values[0]);
+          UseHosted := 'false';
+        end
+        else if UserPlan = 'pro' then
         begin
           GeminiKey := '';
           UseHosted := 'true';
         end
         else
         begin
-          GeminiKey := Trim(GeminiPage.Values[0]);
+          // Free dev — they configure everything themselves
+          GeminiKey := '';
           UseHosted := 'false';
         end;
 
         Lines.Add('GEMINI_API_KEY=' + GeminiKey);
+        { USE_HOSTED_API is written for future use — the host will read this }
+        { once the hosted Gemini proxy is built for Pro users. }
         Lines.Add('USE_HOSTED_API=' + UseHosted);
       end;
 

@@ -83,13 +83,23 @@ export default function LoginPage() {
       return; // skip regular flow & cleanup — no subscription to unsubscribe
     }
 
-    // ─── Handle ?resend=true from expired magic link email ──────────────
+      // ─── Handle ?resend=true from expired magic link email ──────────────
     const searchParams = new URLSearchParams(window.location.search);
     if (searchParams.get("resend") === "true") {
       setResendMode(true);
       window.history.replaceState(null, "", window.location.pathname);
       // Don't return — still set up onAuthStateChange below so an existing
       // session gets detected and the user is redirected automatically.
+    }
+
+    // ─── Handle ?plan= from pricing page ──────────────────────────────────
+    const planParam = searchParams.get("plan");
+    if (planParam === "byok" || planParam === "pro") {
+      // Store in localStorage with TTL so it survives tab close + auth redirects
+      localStorage.setItem("voicer_checkout_plan", JSON.stringify({
+        plan: planParam,
+        expires: Date.now() + 30 * 60 * 1000, // 30 minutes
+      }));
     }
 
     // ─── Handle ?error from failed OAuth callback ──────────────────────────
@@ -123,7 +133,38 @@ export default function LoginPage() {
         setAuthProvider(provider);
       }
 
-      // Unlinked session → waiting room
+      // Check if user came from pricing page with a plan to checkout
+      const stored = localStorage.getItem("voicer_checkout_plan");
+      if (stored) {
+        try {
+          const { plan, expires } = JSON.parse(stored);
+          localStorage.removeItem("voicer_checkout_plan");
+          if (Date.now() < expires && (plan === "pro" || plan === "byok")) {
+            const priceId = plan === "pro"
+              ? process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO
+              : process.env.NEXT_PUBLIC_STRIPE_PRICE_BYOK;
+            if (priceId) {
+              fetch("/api/stripe/checkout", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ priceId }),
+              })
+                .then(res => res.json())
+                .then(data => {
+                  if (data.url) window.location.href = data.url;
+                })
+                .catch(() => {
+                  window.location.replace("/settings");
+                });
+              return;
+            }
+          }
+        } catch {
+          localStorage.removeItem("voicer_checkout_plan");
+        }
+      }
+
+      // No pending plan → waiting room
       setScreen("waiting");
       setupRealtimeListener(supabase, session.user.id);
       fetch("/api/send-verify-email", { method: "POST" }).catch(() => null);
@@ -196,11 +237,41 @@ export default function LoginPage() {
         return;
       }
 
-      // New or unlinked session → waiting room
+      // Check if user came from pricing page with a plan to checkout
+      const stored = localStorage.getItem("voicer_checkout_plan");
+      if (stored) {
+        try {
+          const { plan, expires } = JSON.parse(stored);
+          localStorage.removeItem("voicer_checkout_plan");
+          if (Date.now() < expires && (plan === "pro" || plan === "byok")) {
+            const priceId = plan === "pro"
+              ? process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO
+              : process.env.NEXT_PUBLIC_STRIPE_PRICE_BYOK;
+            if (priceId) {
+              setStatus("Redirecting to checkout...");
+              const res = await fetch("/api/stripe/checkout", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ priceId }),
+              });
+              const data = await res.json();
+              if (data.url) {
+                window.location.href = data.url;
+                return;
+              }
+            }
+          }
+        } catch {
+          localStorage.removeItem("voicer_checkout_plan");
+        }
+      }
+
+      // No pending plan → waiting room
       setStatus(null);
       setLoading(false);
       setScreen("waiting");
       setupRealtimeListener(supabase, session.user.id);
+      fetch("/api/send-verify-email", { method: "POST" }).catch(() => null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setStatus(null);
@@ -303,7 +374,7 @@ export default function LoginPage() {
   if (screen === "waiting") {
     const isMobile = typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     const isOAuth = authProvider === "github" || authProvider === "google";
-    const siteUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://voicers.vercel.app";
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://voicers.vercel.app";
     const qrUrl = `${siteUrl}/verify?p=${authProvider}`;
 
     return (

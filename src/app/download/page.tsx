@@ -20,6 +20,7 @@ function isMobileUA(): boolean {
 function DownloadFlow() {
   const searchParams = useSearchParams();
   const uid = searchParams.get("uid");
+  const planParam = searchParams.get("plan");
   const startedRef = useRef(false);
 
   const [stage, setStage] = useState<Stage>("validating");
@@ -80,8 +81,13 @@ function DownloadFlow() {
       setProgress(96);
 
       const zip = new JSZip();
+      // Plan comes from URL param (set by webhook email) — not from Supabase
+      // because the user opening this link on their PC is unauthenticated (RLS blocks it).
+      // This is advisory only — host enforces plan server-side via get_user_plan_async().
+      const plan = planParam === "pro" || planParam === "byok" ? planParam : "free";
+
       zip.file("VoicerSetup.exe", exeBlob);
-      zip.file("voicer-activation.txt", userId);
+      zip.file("voicer-activation.txt", `${userId}\n${plan}`);
 
       setProgress(98);
       const zipBlob = await zip.generateAsync({ type: "blob" });

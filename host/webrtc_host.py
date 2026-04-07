@@ -34,6 +34,7 @@ from supabase_client import (
     write_signaling_async,
     update_pc_status_async,
     subscribe_signaling,
+    get_user_plan_async,
     USER_ID,
 )
 
@@ -131,8 +132,19 @@ class WebRTCHost:
         # Clipboard watcher (pushes PC clipboard changes to phone)
         self._clipboard_watcher = ClipboardWatcher(callback=self._on_clipboard_change)
 
+        # User plan (checked on start, rechecked on connect)
+        self._user_plan: str = "free"
+
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
+        # Check plan from Supabase — blocks voice for canceled/free users
+        try:
+            self._user_plan = await get_user_plan_async()
+            logger.info("User plan: %s", self._user_plan)
+        except Exception:
+            logger.warning("Could not fetch user plan, defaulting to free")
+            self._user_plan = "free"
+
         self.session_id = await upsert_session_async()
         self._running = True
 
@@ -182,6 +194,13 @@ class WebRTCHost:
 
     async def _handle_offer(self, sdp: str):
         """Process SDP offer from phone and generate answer."""
+        # Recheck plan on each connection (catches upgrades/cancellations)
+        try:
+            self._user_plan = await get_user_plan_async()
+            logger.info("Plan recheck on connect: %s", self._user_plan)
+        except Exception:
+            logger.warning("Plan recheck failed, keeping: %s", self._user_plan)
+
         # Clean up any previous connection
         if self.pc:
             await self.pc.close()
@@ -327,9 +346,16 @@ class WebRTCHost:
                     channel.send(json.dumps({"type": "error", "message": result}))
 
             elif cmd_type == "voice-start":
-                self._voice_mode = data.get("mode", "dictation")
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._start_voice(channel))
+                # Plan enforcement: free users can't use voice
+                if self._user_plan == "free":
+                    channel.send(json.dumps({
+                        "type": "error",
+                        "message": "Voice requires a paid plan. Upgrade at voicers.vercel.app/settings",
+                    }))
+                else:
+                    self._voice_mode = data.get("mode", "dictation")
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._start_voice(channel))
 
             elif cmd_type == "voice-stop":
                 loop = asyncio.get_running_loop()
