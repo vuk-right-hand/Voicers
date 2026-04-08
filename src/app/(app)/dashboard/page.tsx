@@ -86,6 +86,8 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!userId) return;
     let channel: ReturnType<typeof subscribeToSession> | null = null;
+    let currentSessionId: string | null = null;
+    let resyncing = false;
 
     function parseHostReady(data: Session): boolean {
       const raw = data.signaling_data;
@@ -98,6 +100,7 @@ export default function DashboardPage() {
       try {
         const { data } = await fetchActiveSession(userId!);
         if (data) {
+          currentSessionId = data.id;
           setSession(data);
           setHostReady(parseHostReady(data));
 
@@ -117,27 +120,38 @@ export default function DashboardPage() {
     }
 
     // Full re-sync: tear down old Realtime channel, re-fetch session, re-subscribe.
-    // Called on mount and when app resumes from background (visibilitychange).
+    // Resets UI to "Looking for your rig..." so stale "offline" is never shown.
     async function resync() {
+      if (resyncing) return;
+      resyncing = true;
       channel?.unsubscribe();
       channel = null;
-      const { data } = await fetchActiveSession(userId!);
-      if (!data) {
-        setSession(null);
-        setHostReady(false);
-        return;
-      }
-      setSession(data);
-      setHostReady(parseHostReady(data));
+      setLoading(true);
+      setHostReady(false);
 
-      channel = subscribeToSession(
-        data.id,
-        (sigData) => setHostReady(sigData.type === "host-ready"),
-        (status) => {
-          if (status === "waiting") setHostReady(true);
-          else if (status === "offline") setHostReady(false);
-        },
-      );
+      try {
+        const { data } = await fetchActiveSession(userId!);
+        if (!data) {
+          setSession(null);
+          setHostReady(false);
+          return;
+        }
+        currentSessionId = data.id;
+        setSession(data);
+        setHostReady(parseHostReady(data));
+
+        channel = subscribeToSession(
+          data.id,
+          (sigData) => setHostReady(sigData.type === "host-ready"),
+          (status) => {
+            if (status === "waiting") setHostReady(true);
+            else if (status === "offline") setHostReady(false);
+          },
+        );
+      } finally {
+        setLoading(false);
+        resyncing = false;
+      }
     }
 
     load();
@@ -148,18 +162,24 @@ export default function DashboardPage() {
     };
     document.addEventListener("visibilitychange", onVisibility);
 
-    // Polling fallback: if Realtime fires before our subscription is ready we'd
-    // miss the update and stay stuck on "offline". Re-fetch every 5s until ready.
+    // Also re-sync on PWA focus (covers cases where visibilitychange doesn't fire)
+    const onFocus = () => resync();
+    window.addEventListener("focus", onFocus);
+
+    // Polling fallback: re-fetch every 3s to catch any missed Realtime updates.
     const poll = setInterval(async () => {
       const { data } = await fetchActiveSession(userId!);
       if (!data) return;
       setHostReady(parseHostReady(data));
-    }, 5000);
+      // If session ID changed (host restarted), do a full resync for new Realtime sub
+      if (data.id !== currentSessionId) resync();
+    }, 3000);
 
     return () => {
       channel?.unsubscribe();
       clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
     };
   }, [userId]);
 

@@ -406,7 +406,7 @@ export default function LandingPage() {
 
         <br />
 
-        <p className="text-zinc-600 font-mono text-sm">12 + 12 + 13 + 5 = 42s 94s</p>
+        <p className="text-zinc-600 font-mono text-sm">12 + 12 + 13 + 5 = <span className="line-through">42s</span> 94s</p>
 
         <br />
 
