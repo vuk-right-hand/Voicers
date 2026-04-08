@@ -87,18 +87,19 @@ export default function DashboardPage() {
     if (!userId) return;
     let channel: ReturnType<typeof subscribeToSession> | null = null;
 
+    function parseHostReady(data: Session): boolean {
+      const raw = data.signaling_data;
+      const sig: SignalingData | null =
+        typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
+      return sig?.type === "host-ready" || data.pc_status === "waiting";
+    }
+
     async function load() {
       try {
         const { data } = await fetchActiveSession(userId!);
         if (data) {
           setSession(data);
-          const raw = data.signaling_data;
-          const sig: SignalingData | null =
-            typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
-          // Accept either signaling_data.type === "host-ready" OR pc_status === "waiting" —
-          // the host writes these in two separate DB calls so a fetch between them would
-          // miss the signaling flag but still see the status.
-          setHostReady(sig?.type === "host-ready" || data.pc_status === "waiting");
+          setHostReady(parseHostReady(data));
 
           // Subscribe for live updates
           channel = subscribeToSession(
@@ -115,22 +116,50 @@ export default function DashboardPage() {
       }
     }
 
+    // Full re-sync: tear down old Realtime channel, re-fetch session, re-subscribe.
+    // Called on mount and when app resumes from background (visibilitychange).
+    async function resync() {
+      channel?.unsubscribe();
+      channel = null;
+      const { data } = await fetchActiveSession(userId!);
+      if (!data) {
+        setSession(null);
+        setHostReady(false);
+        return;
+      }
+      setSession(data);
+      setHostReady(parseHostReady(data));
+
+      channel = subscribeToSession(
+        data.id,
+        (sigData) => setHostReady(sigData.type === "host-ready"),
+        (status) => {
+          if (status === "waiting") setHostReady(true);
+          else if (status === "offline") setHostReady(false);
+        },
+      );
+    }
+
     load();
+
+    // Re-sync when app comes back to foreground (after being killed / backgrounded)
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") resync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     // Polling fallback: if Realtime fires before our subscription is ready we'd
     // miss the update and stay stuck on "offline". Re-fetch every 5s until ready.
     const poll = setInterval(async () => {
       const { data } = await fetchActiveSession(userId!);
       if (!data) return;
-      const raw = data.signaling_data;
-      const sig: SignalingData | null =
-        typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
-      setHostReady(sig?.type === "host-ready" || data.pc_status === "waiting");
+      setHostReady(parseHostReady(data));
     }, 5000);
 
     return () => {
       channel?.unsubscribe();
       clearInterval(poll);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [userId]);
 

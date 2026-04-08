@@ -8,6 +8,7 @@ import type { Rect } from "@/hooks/use-gestures";
 import { CommsButton } from "@/components/comms-button";
 import { KeyboardOverlay } from "@/components/keyboard-overlay";
 import { POCKET_MODE_BG, TOAST_DISMISS_MS } from "@/lib/constants";
+import { useVoiceStore } from "@/hooks/use-voice";
 
 export default function SessionPage() {
   const router = useRouter();
@@ -840,6 +841,8 @@ export default function SessionPage() {
           )}
         </div>
       )}
+      {/* ── Mic Error Toast ──────────────────────────────────────────────────── */}
+      <MicErrorToast />
       {/* ── Auto-Pocket Mode Warning Toast ──────────────────────────────────── */}
       {showPocketWarning && (
         <div className="fixed bottom-24 left-1/2 z-[5000] animate-pocket-warning" style={{ transform: "translateX(-50%)" }}>
@@ -853,5 +856,33 @@ export default function SessionPage() {
       )}
 
     </main>
+  );
+}
+
+// ─── Mic Error Toast (auto-dismiss) ──────────────────────────────────────────
+
+function MicErrorToast() {
+  const micError = useVoiceStore((s) => s.micError);
+  const setMicError = useVoiceStore((s) => s.setMicError);
+
+  useEffect(() => {
+    if (!micError) return;
+    const t = setTimeout(() => setMicError(null), 3000);
+    return () => clearTimeout(t);
+  }, [micError, setMicError]);
+
+  if (!micError) return null;
+
+  return (
+    <div
+      className="fixed top-16 left-1/2 z-[6000] -translate-x-1/2 animate-[fadeIn_0.2s_ease-out]"
+      onTouchEnd={() => setMicError(null)}
+      onClick={() => setMicError(null)}
+    >
+      <div className="bg-red-500/90 backdrop-blur-md text-white px-5 py-3 rounded-full shadow-2xl flex items-center gap-2">
+        <span className="text-base">🎙️</span>
+        <p className="text-sm font-medium">{micError}</p>
+      </div>
+    </div>
   );
 }

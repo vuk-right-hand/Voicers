@@ -16,6 +16,8 @@ interface VoiceState {
   finalText: string;
   /** Accumulated transcript segments for dictation modal */
   transcript: string;
+  /** Brief error message shown as toast when mic capture fails */
+  micError: string | null;
 
   // Actions (called from hook, not directly)
   setStatus: (s: VoiceStatus) => void;
@@ -24,6 +26,7 @@ interface VoiceState {
   setFinalText: (t: string) => void;
   appendTranscript: (t: string) => void;
   clearTranscript: () => void;
+  setMicError: (msg: string | null) => void;
   reset: () => void;
 }
 
@@ -33,6 +36,7 @@ export const useVoiceStore = create<VoiceState>((set) => ({
   interimText: "",
   finalText: "",
   transcript: "",
+  micError: null,
 
   setStatus: (s) => set({ status: s }),
   setMode: (m) => set({ mode: m }),
@@ -43,6 +47,7 @@ export const useVoiceStore = create<VoiceState>((set) => ({
       transcript: state.transcript ? state.transcript + " " + t : t,
     })),
   clearTranscript: () => set({ transcript: "", interimText: "", finalText: "" }),
+  setMicError: (msg) => set({ micError: msg }),
   reset: () =>
     set({
       status: "idle",
@@ -50,6 +55,7 @@ export const useVoiceStore = create<VoiceState>((set) => ({
       interimText: "",
       finalText: "",
       transcript: "",
+      micError: null,
     }),
 }));
 
@@ -275,6 +281,14 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         store.setStatus("idle");
         store.setMode(null);
         dataChannel.send(JSON.stringify({ type: "voice-stop" }));
+
+        // Surface a user-visible toast
+        const name = (err as DOMException)?.name;
+        if (name === "NotAllowedError" || name === "NotReadableError") {
+          store.setMicError("Mic busy — screen recording?");
+        } else {
+          store.setMicError("Mic unavailable");
+        }
       }
     },
     [dataChannel],
