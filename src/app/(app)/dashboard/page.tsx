@@ -56,7 +56,7 @@ export default function DashboardPage() {
       }
       setUserId(user.id);
 
-      // Check if subscription has expired (plan reverted to free)
+      // Check if subscription has expired (plan reverted to free by webhook)
       const { data: profile } = await supabase
         .from("profiles")
         .select("plan")
@@ -64,16 +64,17 @@ export default function DashboardPage() {
         .single();
 
       if (profile?.plan === "free") {
-        // Check if they ever had a subscription (lapsed vs never-subscribed)
+        // Only gate users whose subscription was explicitly canceled/unpaid.
+        // This lets gifted users (plan set manually, no sub) and dev accounts through.
         const { data: sub } = await supabase
           .from("subscriptions")
-          .select("id")
+          .select("status")
           .eq("user_id", user.id)
+          .in("status", ["canceled", "unpaid"])
           .limit(1)
           .single();
 
         if (sub) {
-          // Lapsed subscriber — show resubscribe gate
           setExpired(true);
           setLoading(false);
           return;
