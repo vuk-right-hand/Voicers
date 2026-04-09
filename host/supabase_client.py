@@ -8,6 +8,7 @@ which drags in pyiceberg and requires a C compiler.
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import Callable
@@ -53,27 +54,45 @@ async def get_user_plan_async() -> str:
 
 
 def upsert_session() -> str:
-    """Create or update the session row. Returns session ID."""
-    # Delete any stale sessions for this user
-    httpx.delete(
-        f"{REST_URL}/sessions?user_id=eq.{USER_ID}",
-        headers=_headers,
-    )
+    """Create or update the session row. Returns session ID.
 
-    # Insert a fresh session
-    resp = httpx.post(
-        f"{REST_URL}/sessions",
-        headers={**_headers, "Prefer": "return=representation"},
-        json={
-            "user_id": USER_ID,
-            "pc_status": "waiting",
-            "signaling_data": {"type": "host-ready", "host_id": USER_ID},
-        },
-    )
-    resp.raise_for_status()
-    session = resp.json()[0]
-    logger.info("Session created: %s (status: waiting)", session["id"])
-    return session["id"]
+    Retries with backoff on network errors — on boot the Registry Run key
+    fires before WiFi/Ethernet is fully connected, so the first few attempts
+    may fail with ConnectTimeout or similar.
+    """
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            # Delete any stale sessions for this user
+            httpx.delete(
+                f"{REST_URL}/sessions?user_id=eq.{USER_ID}",
+                headers=_headers,
+            )
+
+            # Insert a fresh session
+            resp = httpx.post(
+                f"{REST_URL}/sessions",
+                headers={**_headers, "Prefer": "return=representation"},
+                json={
+                    "user_id": USER_ID,
+                    "pc_status": "waiting",
+                    "signaling_data": {"type": "host-ready", "host_id": USER_ID},
+                },
+            )
+            resp.raise_for_status()
+            session = resp.json()[0]
+            logger.info("Session created: %s (status: waiting)", session["id"])
+            return session["id"]
+
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
+            wait = min(2 ** attempt, 30)  # 1, 2, 4, 8, 16, 30, 30...
+            logger.warning(
+                "Network not ready (attempt %d/%d): %s — retrying in %ds",
+                attempt + 1, max_retries, exc, wait,
+            )
+            time.sleep(wait)
+
+    raise RuntimeError("Could not connect to Supabase after %d retries" % max_retries)
 
 
 def write_signaling(session_id: str, data: dict) -> None:

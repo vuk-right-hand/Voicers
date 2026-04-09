@@ -544,12 +544,6 @@ export default function SessionPage() {
               onTouchStart={(e) => { e.stopPropagation(); modalTouchStartY.current = e.touches[0].clientY; modalDidScroll.current = false; }}
               onTouchMove={(e) => { e.stopPropagation(); if (Math.abs(e.touches[0].clientY - modalTouchStartY.current) > 6) modalDidScroll.current = true; }}
             >
-              {/* Account placeholder */}
-              <div className="rounded-2xl bg-white/5 px-4 py-3">
-                <p className="text-xs text-white/40 uppercase tracking-wider mb-1">Account</p>
-                <p className="text-sm text-white/50">Google Sign-In — coming soon</p>
-              </div>
-
               {/* Actions */}
               <div className="flex flex-col gap-2">
                 <button
@@ -559,7 +553,7 @@ export default function SessionPage() {
                   className="w-full rounded-2xl bg-white/10 px-4 py-3 text-left text-sm text-white active:bg-white/20 transition-colors"
                 >
                   <span className="font-medium">Pocket Mode</span>
-                  <span className="ml-2 text-white/40">Blackout screen, keep mic hot</span>
+                  <span className="ml-2 text-white/40">Blackout screen</span>
                 </button>
                 <button
                   type="button"
@@ -589,6 +583,17 @@ export default function SessionPage() {
                   ))}
                 </div>
               </div>
+
+              {/* Manage subscription */}
+              <button
+                type="button"
+                onClick={() => { setSettingsOpen(false); router.push("/settings"); }}
+                onTouchEnd={(e) => { e.stopPropagation(); if (!modalDidScroll.current) { setSettingsOpen(false); router.push("/settings"); } }}
+                className="w-full rounded-2xl bg-white/5 px-4 py-3 text-left text-sm text-white/50 active:bg-white/10 transition-colors"
+              >
+                <span className="font-medium">Manage Subscription</span>
+                <span className="ml-2 text-white/30">Plan, billing, cancel</span>
+              </button>
             </div>
           </div>
         </div>
