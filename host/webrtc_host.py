@@ -34,7 +34,7 @@ from supabase_client import (
     write_signaling_async,
     update_pc_status_async,
     subscribe_signaling,
-    get_user_plan_async,
+    check_subscription_blocked_async,
     USER_ID,
 )
 
@@ -132,18 +132,17 @@ class WebRTCHost:
         # Clipboard watcher (pushes PC clipboard changes to phone)
         self._clipboard_watcher = ClipboardWatcher(callback=self._on_clipboard_change)
 
-        # User plan (checked on start, rechecked on connect)
-        self._user_plan: str = "free"
+        # Subscription blocked flag (checked on start, rechecked on connect)
+        self._subscription_blocked: bool = False
 
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
-        # Check plan from Supabase — blocks voice for canceled/free users
         try:
-            self._user_plan = await get_user_plan_async()
-            logger.info("User plan: %s", self._user_plan)
+            self._subscription_blocked = await check_subscription_blocked_async()
+            logger.info("Subscription blocked: %s", self._subscription_blocked)
         except Exception:
-            logger.warning("Could not fetch user plan, defaulting to free")
-            self._user_plan = "free"
+            logger.warning("Could not check subscription, allowing connection")
+            self._subscription_blocked = False
 
         self.session_id = await upsert_session_async()
         self._running = True
@@ -194,15 +193,15 @@ class WebRTCHost:
 
     async def _handle_offer(self, sdp: str):
         """Process SDP offer from phone and generate answer."""
-        # Recheck plan on each connection (catches upgrades/cancellations)
+        # Recheck subscription on each connection (catches upgrades/cancellations)
         try:
-            self._user_plan = await get_user_plan_async()
-            logger.info("Plan recheck on connect: %s", self._user_plan)
+            self._subscription_blocked = await check_subscription_blocked_async()
+            logger.info("Subscription blocked recheck: %s", self._subscription_blocked)
         except Exception:
-            logger.warning("Plan recheck failed, keeping: %s", self._user_plan)
+            logger.warning("Subscription recheck failed, keeping: %s", self._subscription_blocked)
 
-        if self._user_plan == "free":
-            logger.warning("Rejecting connection — plan is free")
+        if self._subscription_blocked:
+            logger.warning("Rejecting connection — subscription canceled/unpaid")
             await write_signaling_async(self.session_id, {
                 "type": "rejected",
                 "reason": "subscription_expired",

@@ -36,21 +36,36 @@ _headers = {
 }
 
 
-def get_user_plan() -> str:
-    """Fetch the user's plan from Supabase profiles table."""
+def check_subscription_blocked() -> bool:
+    """Return True if the user should be blocked (lapsed paid subscriber).
+
+    Logic: only block if plan == 'free' AND a subscription row exists with
+    status 'canceled' or 'unpaid'.  Dev accounts, gifted users (plan set
+    manually with no sub row), and active subscribers all pass through.
+    """
+    # 1. Fetch plan
     resp = httpx.get(
         f"{REST_URL}/profiles?id=eq.{USER_ID}&select=plan",
         headers=_headers,
     )
     resp.raise_for_status()
     rows = resp.json()
-    if rows:
-        return rows[0].get("plan", "free")
-    return "free"
+    plan = rows[0].get("plan", "free") if rows else "free"
+
+    if plan != "free":
+        return False  # Active paid plan — allow
+
+    # 2. Plan is free — check if they have a canceled/unpaid subscription
+    resp2 = httpx.get(
+        f"{REST_URL}/subscriptions?user_id=eq.{USER_ID}&status=in.(canceled,unpaid)&select=id&limit=1",
+        headers=_headers,
+    )
+    resp2.raise_for_status()
+    return len(resp2.json()) > 0  # True = blocked (lapsed subscriber)
 
 
-async def get_user_plan_async() -> str:
-    return await asyncio.to_thread(get_user_plan)
+async def check_subscription_blocked_async() -> bool:
+    return await asyncio.to_thread(check_subscription_blocked)
 
 
 def upsert_session() -> str:
