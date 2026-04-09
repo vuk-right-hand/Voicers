@@ -209,7 +209,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
           );
           store.setStatus("idle");
           store.setMode(null);
-          dataChannel.send(JSON.stringify({ type: "voice-stop" }));
+          dataChannel.send(JSON.stringify({ type: "voice-stop", reason: "no-https" }));
           return;
         }
 
@@ -227,6 +227,22 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
           },
         });
         streamRef.current = stream;
+
+        // Monitor audio track lifecycle — detect mic death from OS/browser
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          audioTrack.onended = () => {
+            console.warn("[voice] Audio track ended — mic was revoked or taken by another app");
+            stopListening("track-ended");
+            useVoiceStore.getState().setMicError("Mic disconnected");
+          };
+          audioTrack.onmute = () => {
+            console.warn("[voice] Audio track muted by OS/browser");
+          };
+          audioTrack.onunmute = () => {
+            console.info("[voice] Audio track unmuted");
+          };
+        }
 
         // Guard: stopListening() may have run during the getUserMedia await
         if (!audioCtxRef.current) {
@@ -280,7 +296,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         console.error("Mic capture failed:", err);
         store.setStatus("idle");
         store.setMode(null);
-        dataChannel.send(JSON.stringify({ type: "voice-stop" }));
+        dataChannel.send(JSON.stringify({ type: "voice-stop", reason: "mic-error" }));
 
         // Surface a user-visible toast
         const name = (err as DOMException)?.name;
@@ -294,7 +310,10 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
     [dataChannel],
   );
 
-  const stopListening = useCallback(() => {
+  const stopListening = useCallback((reason?: string) => {
+    const why = reason || "unknown";
+    console.trace(`[voice] stopListening called — reason: ${why}`);
+
     // Tear down audio pipeline
     if (gainRef.current) {
       gainRef.current.disconnect();
@@ -319,7 +338,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
 
     // Tell host we're done
     if (dataChannel?.readyState === "open") {
-      dataChannel.send(JSON.stringify({ type: "voice-stop" }));
+      dataChannel.send(JSON.stringify({ type: "voice-stop", reason: why }));
     }
 
     const store = useVoiceStore.getState();

@@ -52,10 +52,12 @@ class GeminiLive:
         self._send_task: asyncio.Task | None = None
         self._recv_task: asyncio.Task | None = None
         self._active = False
+        self._restarting = False  # True during restart — send_audio still queues
         self._session = None
         self._session_ctx = None
         self.interim_buffer = ""  # public — caller reads this for final text
-        self._last_activity_start: float = 0.0  # throttle turn_complete → activityStart
+        self._last_activity_start: float = 0.0
+        self._last_turn_complete: float = 0.0
 
     async def start(self, _preserve_buffer: bool = False) -> None:
         """Open Gemini Live session and start send/recv background tasks."""
@@ -73,7 +75,6 @@ class GeminiLive:
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=True,
@@ -93,6 +94,7 @@ class GeminiLive:
         await self._session.send_realtime_input(
             activity_start=types.ActivityStart()
         )
+        self._last_activity_start = time.monotonic()
 
         loop = asyncio.get_running_loop()
         self._send_task = loop.create_task(self._send_loop(), name="gemini-send")
@@ -101,12 +103,14 @@ class GeminiLive:
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         """Queue raw 16kHz Int16 PCM chunk for streaming to Gemini."""
-        if not self._active:
+        if not self._active and not self._restarting:
             return
         try:
             self._audio_queue.put_nowait(pcm_bytes)
         except asyncio.QueueFull:
-            logger.warning("Gemini audio queue full — dropping chunk")
+            # During restart, silently drop — queue will drain into new session
+            if not self._restarting:
+                logger.warning("Gemini audio queue full — dropping chunk")
 
     async def stop(self) -> None:
         """Gracefully shut down: cancel tasks, drain queue, close session."""
@@ -144,6 +148,7 @@ class GeminiLive:
     async def restart(self) -> None:
         """Tear down the dead session and open a fresh one, preserving interim_buffer."""
         saved_buffer = self.interim_buffer
+        self._restarting = True  # send_audio() keeps queueing during restart
 
         # Cancel tasks and close session without touching interim_buffer
         self._active = False
@@ -163,17 +168,17 @@ class GeminiLive:
             self._session_ctx = None
             self._session = None
 
-        # Drain the audio queue
-        while not self._audio_queue.empty():
-            try:
-                self._audio_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        # Don't drain the audio queue — let buffered chunks flow to new session.
+        # Any audio queued during the restart gap will be sent immediately.
 
         # Restore buffer and boot fresh session (flag tells start() not to clear it)
         self.interim_buffer = saved_buffer
-        await self.start(_preserve_buffer=True)
-        logger.info("Gemini session restarted — buffer preserved (%d chars)", len(saved_buffer))
+        try:
+            await self.start(_preserve_buffer=True)
+        finally:
+            self._restarting = False
+        logger.info("Gemini session restarted — buffer preserved (%d chars), queued chunks: %d",
+                     len(saved_buffer), self._audio_queue.qsize())
 
     # ── Internal tasks ────────────────────────────────────────────────────────
 
@@ -203,50 +208,89 @@ class GeminiLive:
         logger.info("Send loop ended — %d chunks sent total", chunks_sent)
 
     async def _recv_loop(self) -> None:
-        """Receive ASR transcriptions. Session stays open (VAD disabled, no turn_complete)."""
-        msgs_received = 0
+        """Receive ASR transcriptions.
+
+        After turn_complete, session.receive() iterator exhausts. We try a
+        lightweight restart (re-send activityStart). If that fails or produces
+        rapid repeated turn_completes, we break out and trigger a full session
+        restart via on_session_dead.
+        """
+        total_received = 0
         try:
-            async for response in self._session.receive():
+            while self._active:
+                msgs_this_turn = 0
+                had_input_transcription = False
+                async for response in self._session.receive():
+                    if not self._active:
+                        break
+
+                    total_received += 1
+                    msgs_this_turn += 1
+
+                    content = response.server_content
+                    if content is None:
+                        logger.debug("Gemini msg #%d: no server_content", total_received)
+                        continue
+
+                    has_input = hasattr(content, 'input_transcription') and content.input_transcription and content.input_transcription.text
+                    has_turn = hasattr(content, 'turn_complete') and content.turn_complete
+                    has_model_turn = hasattr(content, 'model_turn') and content.model_turn
+
+                    # Raw ASR — accumulated for progressive UI feedback
+                    if has_input:
+                        raw = content.input_transcription.text
+                        logger.info("  input_transcription: %r", raw[:100])
+                        had_input_transcription = True
+                        if raw.strip() and _HAS_LATIN_OR_DIGIT.search(raw):
+                            self.interim_buffer = (self.interim_buffer + raw).strip()
+                            self._on_transcript(self.interim_buffer, False)
+
+                    if has_model_turn:
+                        logger.info("  model_turn (ignored — model responded despite no activityEnd)")
+
+                    if has_turn:
+                        logger.info("turn_complete — will attempt to reopen turn")
+
+                # Iterator exhausted (turn_complete closes it).
                 if not self._active:
                     break
 
-                msgs_received += 1
+                now = time.monotonic()
+                since_last_turn = now - self._last_turn_complete if self._last_turn_complete else 999
+                self._last_turn_complete = now
 
-                content = response.server_content
-                if content is None:
-                    continue
+                # If turns are completing rapidly (< 3s apart) or the last turn
+                # had no transcriptions at all, the lightweight restart isn't
+                # working — escalate to full session restart.
+                if since_last_turn < 3.0:
+                    logger.warning(
+                        "Rapid turn completion (%.1fs apart, %d msgs) — "
+                        "lightweight restart failing, triggering full restart",
+                        since_last_turn, msgs_this_turn,
+                    )
+                    break
 
-                # Raw ASR — accumulated for progressive UI feedback
-                if hasattr(content, 'input_transcription') and content.input_transcription and content.input_transcription.text:
-                    raw = content.input_transcription.text
-                    # English filter: skip chunks with no Latin characters
-                    if raw.strip() and _HAS_LATIN_OR_DIGIT.search(raw):
-                        self.interim_buffer = (self.interim_buffer + raw).strip()
-                        self._on_transcript(self.interim_buffer, False)
-
-                # turn_complete fires when Gemini thinks the user stopped speaking.
-                # Re-send activityStart to keep the turn open so audio sent after
-                # a pause is still transcribed. Throttle to max once per 2s to
-                # prevent a tight loop if Gemini keeps firing turn_complete.
-                if hasattr(content, 'turn_complete') and content.turn_complete:
-                    now = time.monotonic()
-                    if now - self._last_activity_start >= 2.0:
-                        logger.warning("turn_complete received — reopening turn with activityStart")
-                        try:
-                            await self._session.send_realtime_input(
-                                activity_start=types.ActivityStart()
-                            )
-                            self._last_activity_start = now
-                        except Exception as exc:
-                            logger.warning("Failed to reopen turn after turn_complete: %s", exc)
-                    else:
-                        logger.debug("turn_complete received — throttled (%.1fs since last activityStart)",
-                                     now - self._last_activity_start)
+                logger.info(
+                    "Receive iterator exhausted after %d msgs (%.1fs since last turn, had_transcription=%s) — reopening turn",
+                    msgs_this_turn, since_last_turn, had_input_transcription,
+                )
+                try:
+                    await self._session.send_realtime_input(
+                        activity_start=types.ActivityStart()
+                    )
+                    self._last_activity_start = time.monotonic()
+                except Exception as exc:
+                    logger.warning("Failed to reopen turn: %s — triggering full restart", exc)
+                    break
 
         except asyncio.CancelledError:
             pass
         except Exception as exc:
             logger.error("Gemini recv error: %s", exc, exc_info=True)
-            if self._active and self._on_session_dead:
-                self._on_session_dead()
-        logger.info("Recv loop ended — %d messages received total", msgs_received)
+
+        # If we're still supposed to be active but the loop exited,
+        # the Gemini session died — trigger auto-restart.
+        if self._active and self._on_session_dead:
+            logger.warning("Recv loop exited while voice active — triggering full session restart")
+            self._on_session_dead()
+        logger.info("Recv loop ended — %d messages received total", total_received)

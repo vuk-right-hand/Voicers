@@ -97,13 +97,13 @@ export function CommsButton({
         isHolding.current = false;
 
         if (wheelVoiceDetected) {
-          stopListening();
+          stopListening("wheel-voice-release");
           setShowWheel(false);
           setActiveSlice(null);
           return;
         }
 
-        stopListening();
+        stopListening("wheel-release");
 
         if (activeSlice !== null) {
           const cmd = WHEEL_COMMANDS[activeSlice];
@@ -183,7 +183,7 @@ export function CommsButton({
       e.preventDefault();
       if (!showWheel) return;
       isHolding.current = false;
-      stopListening();
+      stopListening("wheel-overlay-touchend");
       if (activeSlice !== null) {
         const cmd = WHEEL_COMMANDS[activeSlice];
         sendCommand({ type: "command", action: cmd.action, payload: { ...cmd.payload } });
@@ -216,14 +216,14 @@ export function CommsButton({
   const handleAccept = useCallback(() => {
     const fullText = (transcript + (interimText ? " " + interimText : "")).trim();
     if (fullText) {
-      stopListening();
+      stopListening("accept-button");
       acceptDictation(fullText);
     }
     setShowDictation(false);
   }, [transcript, interimText, stopListening, acceptDictation]);
 
   const handleCancel = useCallback(() => {
-    stopListening();
+    stopListening("cancel-button");
     cancelDictation();
     setShowDictation(false);
   }, [stopListening, cancelDictation]);
@@ -285,7 +285,7 @@ export function CommsButton({
                     e.preventDefault();
                     sendCommand({ type: "command", action: cmd.action, payload: { ...cmd.payload } });
                     useVoiceStore.getState().reset();
-                    stopListening();
+                    stopListening("wheel-slice-tap");
                     setShowWheel(false);
                     setActiveSlice(null);
                   }}

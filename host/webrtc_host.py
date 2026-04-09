@@ -358,6 +358,8 @@ class WebRTCHost:
                 loop.create_task(self._start_voice(channel))
 
             elif cmd_type == "voice-stop":
+                reason = data.get("reason", "no-reason")
+                logger.info(">>> Received voice-stop from PWA — reason: %s", reason)
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._stop_voice(channel))
 
@@ -461,11 +463,16 @@ class WebRTCHost:
         try:
             await self._gemini.restart()
         except Exception as exc:
-            logger.error("Failed to restart Gemini session: %s", exc)
+            logger.error("Failed to restart Gemini session: %s — voice is dead", exc)
+            # Don't leave a zombie — notify PWA that voice stopped
+            self._voice_active = False
+            self._voice_mode = None
+            if channel and channel.readyState == "open":
+                channel.send(json.dumps({"type": "voice-status", "status": "idle"}))
             return
         finally:
             self._gemini_restarting = False
-        if channel.readyState == "open":
+        if channel and channel.readyState == "open":
             channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
     async def _stop_voice(self, channel=None):
