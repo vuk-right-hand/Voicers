@@ -252,36 +252,18 @@ class GeminiLive:
                         logger.info("turn_complete — will attempt to reopen turn")
 
                 # Iterator exhausted (turn_complete closes it).
+                # Lightweight restart (re-send activityStart) leaves the session
+                # in a degraded state where input_transcription hallucinates.
+                # Always do a full session restart (new WebSocket) to guarantee
+                # clean transcription.
                 if not self._active:
                     break
-
-                now = time.monotonic()
-                since_last_turn = now - self._last_turn_complete if self._last_turn_complete else 999
-                self._last_turn_complete = now
-
-                # If turns are completing rapidly (< 3s apart) or the last turn
-                # had no transcriptions at all, the lightweight restart isn't
-                # working — escalate to full session restart.
-                if since_last_turn < 3.0:
-                    logger.warning(
-                        "Rapid turn completion (%.1fs apart, %d msgs) — "
-                        "lightweight restart failing, triggering full restart",
-                        since_last_turn, msgs_this_turn,
-                    )
-                    break
-
-                logger.info(
-                    "Receive iterator exhausted after %d msgs (%.1fs since last turn, had_transcription=%s) — reopening turn",
-                    msgs_this_turn, since_last_turn, had_input_transcription,
+                logger.warning(
+                    "turn_complete after %d msgs (had_transcription=%s) — "
+                    "forcing full session restart for clean state",
+                    msgs_this_turn, had_input_transcription,
                 )
-                try:
-                    await self._session.send_realtime_input(
-                        activity_start=types.ActivityStart()
-                    )
-                    self._last_activity_start = time.monotonic()
-                except Exception as exc:
-                    logger.warning("Failed to reopen turn: %s — triggering full restart", exc)
-                    break
+                break
 
         except asyncio.CancelledError:
             pass
