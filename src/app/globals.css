@@ -49,6 +49,10 @@ body {
   animation: slide-up-fade-in 0.3s ease-out forwards;
 }
 
+.animate-fade-in-up {
+  animation: slide-up-fade-in 0.3s ease-out forwards;
+}
+
 /* ── Landing page ── */
 
 @keyframes float {

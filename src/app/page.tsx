@@ -1,9 +1,13 @@
+"use client";
+
 import Link from "next/link";
 import Image from "next/image";
+import FloatingInfectButton from "@/components/floating-infect-button";
 
 export default function LandingPage() {
   return (
     <div className="relative min-h-screen bg-black text-white overflow-hidden">
+      <FloatingInfectButton targetId="voicer-headline" />
       {/* Ambient glow */}
       <div className="pointer-events-none fixed inset-0 z-0">
         <div className="absolute top-[-200px] left-1/2 -translate-x-1/2 w-[800px] h-[500px] rounded-full bg-blue-500/[0.03] blur-[120px] animate-glow-pulse" />
@@ -56,7 +60,7 @@ export default function LandingPage() {
 
         <br />
 
-        <p className="text-white font-bold text-3xl sm:text-4xl text-center">Voicer&hellip;</p>
+        <p id="voicer-headline" className="text-white font-bold text-3xl sm:text-4xl text-center">Voicer&hellip;</p>
 
         <br />
 

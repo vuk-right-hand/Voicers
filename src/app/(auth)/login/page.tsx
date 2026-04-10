@@ -520,8 +520,12 @@ export default function LoginPage() {
           <button
             type="button"
             tabIndex={-1}
-            onPointerDown={(e) => {
-              e.preventDefault();
+            onTouchEnd={(e) => {
+              e.preventDefault(); // prevents mousedown→focus-shift→keyboard-dismiss
+              setShowPassword((prev) => !prev);
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault(); // desktop: prevents input blur
               setShowPassword((prev) => !prev);
             }}
             className="absolute right-0 top-0 z-10 flex h-full w-14 items-center justify-center text-zinc-500 active:text-zinc-300"
