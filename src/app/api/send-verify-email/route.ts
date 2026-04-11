@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createClient as createAdminClient } from "@supabase/supabase-js";
-
-// TODO: add Upstash Redis / Vercel KV rate limiting before production.
-// The auth requirement already limits blast radius (attacker needs a valid session),
-// but a token bucket per user.id would prevent repeated Resend charges.
+import { emailRatelimit } from "@/lib/ratelimit";
 
 export async function POST() {
   // Verify caller is authenticated — email is read from the session, never from client input
@@ -13,6 +10,12 @@ export async function POST() {
 
   if (!user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Token bucket: 3 emails per hour per user
+  const { success } = await emailRatelimit.limit(user.id);
+  if (!success) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
 
   // Admin client: generate a magic link server-side so Device B can tap it directly.

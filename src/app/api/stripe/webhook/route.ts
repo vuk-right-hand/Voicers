@@ -220,6 +220,102 @@ async function upsertSubscription(subscription: Stripe.Subscription, userId?: st
   return true;
 }
 
+async function sendPaymentFailedEmail(userId: string) {
+  const admin = getAdmin();
+  const { data: { user }, error } = await admin.auth.admin.getUserById(userId);
+  if (error || !user?.email) {
+    console.error("webhook: could not look up user for dunning email", userId, error);
+    return;
+  }
+
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://voicers.vercel.app";
+  const settingsUrl = `${siteUrl}/settings`;
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: process.env.RESEND_FROM_EMAIL ?? "Voicer <onboarding@resend.dev>",
+      to: user.email,
+      subject: "Heads up — your Voicer payment didn't go through",
+      html: `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#000000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#000000;padding:48px 24px;">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;">
+        <tr><td style="padding-bottom:32px;">
+          <p style="margin:0;font-size:24px;font-weight:700;color:#ffffff;">Voicer</p>
+        </td></tr>
+        <tr><td style="padding-bottom:20px;">
+          <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
+            We tried to charge your card but it didn&rsquo;t go through.<br><br>
+            No worries &mdash; <strong>we&rsquo;ve got you covered for the next 24 hours</strong>
+            so you can keep working without interruptions.
+            Just update your payment method before then and you&rsquo;re all set.
+          </p>
+        </td></tr>
+        <tr><td style="padding-bottom:32px;">
+          <a href="${settingsUrl}"
+             style="display:inline-block;background:#ffffff;color:#000000;font-size:15px;font-weight:600;padding:14px 32px;border-radius:12px;text-decoration:none;">
+            Update payment method &rarr;
+          </a>
+        </td></tr>
+        <tr><td style="border-top:1px solid #27272a;padding-top:24px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#52525b;">
+            Questions? Just reply to this email.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("webhook: dunning email Resend error", await res.text());
+  }
+}
+
+async function handlePaymentFailed(invoice: Stripe.Invoice) {
+  const admin = getAdmin();
+  const customerId =
+    typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id;
+
+  // Stripe v22+: subscription lives under parent.subscription_details
+  const subRef = invoice.parent?.subscription_details?.subscription;
+  const subscriptionId = typeof subRef === "string" ? subRef : subRef?.id;
+
+  if (!subscriptionId || !customerId) return true; // one-off invoice, not subscription
+
+  const profile = await findProfile(admin, customerId);
+  if (!profile) {
+    console.error("webhook: no profile for failed payment", customerId);
+    return false;
+  }
+
+  // Mark failure timestamp, reset reminder flag for this new failure cycle
+  await admin
+    .from("subscriptions")
+    .update({
+      payment_failed_at: new Date().toISOString(),
+      payment_reminder_sent: false,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("stripe_subscription_id", subscriptionId);
+
+  // Send the "24h grace" email
+  await sendPaymentFailedEmail(profile.id);
+
+  return true;
+}
+
 async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
   const admin = getAdmin();
   const customerId = subscription.customer as string;
@@ -282,6 +378,11 @@ export async function POST(req: Request) {
     case "customer.subscription.deleted": {
       const subscription = event.data.object as Stripe.Subscription;
       success = await handleSubscriptionDeleted(subscription);
+      break;
+    }
+    case "invoice.payment_failed": {
+      const invoice = event.data.object as Stripe.Invoice;
+      success = await handlePaymentFailed(invoice);
       break;
     }
   }
