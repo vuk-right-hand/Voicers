@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import type { PcStatus, TransportStatus, PhoneCommand } from "@/types";
-import { initiateCall, fetchIceServers } from "@/lib/webrtc/peer";
+import { initiateCall } from "@/lib/webrtc/peer";
 import { useVoiceStore, playTTSAudio } from "@/hooks/use-voice";
 import { CLIPBOARD_TIMEOUT_MS } from "@/lib/constants";
 
@@ -28,7 +28,7 @@ interface SessionState {
   sessionId: string | null;
 
   // Actions
-  connectToHost: (sessionId: string) => Promise<void>;
+  connectToHost: (sessionId: string, iceServers?: RTCIceServer[]) => Promise<void>;
   disconnect: () => void;
   setPcStatus: (status: PcStatus) => void;
   togglePocketMode: () => void;
@@ -74,13 +74,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   isPocketMode: false,
   sessionId: null,
 
-  connectToHost: async (sessionId) => {
+  connectToHost: async (sessionId, iceServers) => {
     // Clean up any existing connection
     _close?.();
     set({ sessionId, transportStatus: "signaling", mediaStream: null, dataChannel: null });
-
-    // Fetch TURN credentials BEFORE creating the peer connection
-    const iceServers = await fetchIceServers();
 
     const { pc, close } = initiateCall(
       sessionId,

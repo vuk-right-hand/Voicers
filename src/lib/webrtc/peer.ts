@@ -13,35 +13,6 @@ const FALLBACK_ICE: RTCIceServer[] = [
   { urls: "stun:stun1.l.google.com:19302" },
 ];
 
-// Fetches ICE servers from a metered.ca-style credentials API endpoint.
-// Falls back to Google STUN only if the fetch fails or no key is configured.
-export async function fetchIceServers(): Promise<RTCIceServer[]> {
-  try {
-    const apiUrl = localStorage.getItem("voicer_turn_api_url");
-    const apiKey = localStorage.getItem("voicer_turn_api_key");
-    if (!apiUrl || !apiKey) return FALLBACK_ICE;
-
-    const res = await fetch(`${apiUrl}?apiKey=${apiKey}`);
-    if (!res.ok) {
-      console.warn("[peer] TURN API returned", res.status);
-      return FALLBACK_ICE;
-    }
-
-    // metered.ca returns `url` (singular string) — RTCIceServer needs `urls`
-    const raw: Array<Record<string, unknown>> = await res.json();
-    const servers: RTCIceServer[] = raw.map((s) => ({
-      urls: (s.urls ?? s.url) as string | string[],
-      ...(s.username ? { username: s.username as string } : {}),
-      ...(s.credential ? { credential: s.credential as string } : {}),
-    }));
-    console.info("[peer] Fetched %d ICE servers (incl. TURN)", servers.length);
-    return servers.length ? servers : FALLBACK_ICE;
-  } catch (err) {
-    console.warn("[peer] TURN fetch failed:", err);
-    return FALLBACK_ICE;
-  }
-}
-
 export interface PeerConnection {
   stream: MediaStream;
   dataChannel: RTCDataChannel;

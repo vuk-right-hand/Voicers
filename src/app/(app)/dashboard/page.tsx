@@ -25,27 +25,6 @@ export default function DashboardPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
 
-  // ── TURN config (BYOK, stored in localStorage) ──────────────────────────
-  const [turnOpen, setTurnOpen] = useState(false);
-  const [turnApiUrl, setTurnApiUrl] = useState("");
-  const [turnApiKey, setTurnApiKey] = useState("");
-
-  useEffect(() => {
-    setTurnApiUrl(localStorage.getItem("voicer_turn_api_url") ?? "");
-    setTurnApiKey(localStorage.getItem("voicer_turn_api_key") ?? "");
-  }, []);
-
-  const saveTurn = () => {
-    if (turnApiUrl.trim() && turnApiKey.trim()) {
-      localStorage.setItem("voicer_turn_api_url", turnApiUrl.trim());
-      localStorage.setItem("voicer_turn_api_key", turnApiKey.trim());
-    } else {
-      localStorage.removeItem("voicer_turn_api_url");
-      localStorage.removeItem("voicer_turn_api_key");
-    }
-    setTurnOpen(false);
-  };
-
   // Get authenticated user + check plan
   useEffect(() => {
     const supabase = createClient();
@@ -186,9 +165,18 @@ export default function DashboardPage() {
 
   const handleConnect = () => {
     if (!session) return;
-    connectToHost(session.id);
+    const sig = session.signaling_data as SignalingData | null;
+    const iceServers = sig?.type === "host-ready" ? sig.ice_servers : undefined;
+    connectToHost(session.id, iceServers);
     router.push("/session");
   };
+
+  // TURN status from host signaling (for BYOK error feedback)
+  const turnStatus = (() => {
+    if (!session) return "none";
+    const sig = session.signaling_data as SignalingData | null;
+    return sig?.type === "host-ready" ? (sig.turn_status ?? "none") : "none";
+  })();
 
 
   const isConnecting = transportStatus === "signaling" || transportStatus === "connecting";
@@ -264,43 +252,11 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* ── TURN Server config (for 4G / CGNAT) ────────────────────────────── */}
-      <div className="w-full max-w-xs">
-        <button
-          type="button"
-          onClick={() => setTurnOpen((o) => !o)}
-          className="w-full text-xs text-zinc-600 flex items-center justify-between px-3 py-2 rounded-xl hover:bg-zinc-900 transition-colors"
-        >
-          <span>TURN Server {turnApiKey ? <span className="text-green-500 ml-1">●</span> : <span className="text-zinc-700 ml-1">○</span>}</span>
-          <span>{turnOpen ? "▲" : "▼"}</span>
-        </button>
-        {turnOpen && (
-          <div className="mt-2 flex flex-col gap-2 bg-zinc-900 rounded-2xl p-4">
-            <p className="text-xs text-zinc-500">Required for 4G. Paste your metered.ca credentials API URL and key.</p>
-            <input
-              type="text"
-              placeholder="https://yourapp.metered.live/api/v1/turn/credentials"
-              value={turnApiUrl}
-              onChange={(e) => setTurnApiUrl(e.target.value)}
-              className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
-            />
-            <input
-              type="password"
-              placeholder="API Key"
-              value={turnApiKey}
-              onChange={(e) => setTurnApiKey(e.target.value)}
-              className="rounded-lg bg-zinc-800 px-3 py-2 text-xs text-white placeholder:text-zinc-600 outline-none"
-            />
-            <button
-              type="button"
-              onClick={saveTurn}
-              className="rounded-xl bg-white px-4 py-2 text-xs font-semibold text-black active:scale-95 transition-transform"
-            >
-              Save
-            </button>
-          </div>
-        )}
-      </div>
+      {turnStatus === "error" && (
+        <p className="text-xs text-red-400 max-w-xs text-center">
+          TURN error — check your API keys in the desktop host. Local network only.
+        </p>
+      )}
     </main>
   );
 }

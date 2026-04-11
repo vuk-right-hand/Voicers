@@ -60,6 +60,7 @@ Type: files; Name: "{app}\host\.env"
 [Code]
 var
   GeminiPage: TInputQueryWizardPage;
+  TurnPage: TInputQueryWizardPage;
   UserPlan: string;
 
 function ReadActivationFile: string;
@@ -114,6 +115,14 @@ begin
     'Get a free key at https://aistudio.google.com/apikeys' + #13#10 +
     'This key stays on your computer and is never sent to our servers.');
   GeminiPage.Add('API Key:', False);
+
+  // ─── Cloudflare TURN input page (only shown for BYOK) ─────────────────
+  TurnPage := CreateInputQueryPage(GeminiPage.ID,
+    'Cloudflare TURN', 'Paste your Cloudflare TURN credentials',
+    'Create a free TURN key at dash.cloudflare.com > Realtime > TURN.' + #13#10 +
+    'Required for mobile (4G/5G) connections. Optional for local Wi-Fi.');
+  TurnPage.Add('Turn Token ID:', False);
+  TurnPage.Add('API Token:', False);
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -121,6 +130,9 @@ begin
   Result := False;
   // Skip Gemini key page unless user is on BYOK plan
   if (PageID = GeminiPage.ID) and (UserPlan <> 'byok') then
+    Result := True;
+  // Skip TURN page unless user is on BYOK plan
+  if (PageID = TurnPage.ID) and (UserPlan <> 'byok') then
     Result := True;
 end;
 
@@ -195,6 +207,8 @@ var
   ServiceRoleKey: string;
   SupabaseUrl: string;
   UserId: string;
+  CfTurnKeyId: string;
+  CfTurnApiToken: string;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -204,6 +218,25 @@ begin
 
     // Read USER_ID from activation file (downloaded alongside the installer)
     UserId := ReadActivationFile;
+
+    // Read Cloudflare TURN values
+    // BYOK: user pastes keys in installer. Pro: no CF keys on disk (served via API).
+    // Free/dev: read from template if present (dev builds only).
+    if UserPlan = 'byok' then
+    begin
+      CfTurnKeyId := Trim(TurnPage.Values[0]);
+      CfTurnApiToken := Trim(TurnPage.Values[1]);
+    end
+    else if UserPlan = 'pro' then
+    begin
+      CfTurnKeyId := '';
+      CfTurnApiToken := '';
+    end
+    else
+    begin
+      CfTurnKeyId := ReadKeyFromTemplate('CF_TURN_KEY_ID');
+      CfTurnApiToken := ReadKeyFromTemplate('CF_TURN_API_TOKEN');
+    end;
 
     EnvFile := ExpandConstant('{app}\host\.env');
     Lines := TStringList.Create;
@@ -217,6 +250,11 @@ begin
         // Update USER_ID only if activation file provided a value
         if UserId <> '' then
           UpdateEnvKey(Lines, 'USER_ID', UserId);
+        // Add CF TURN keys if provided (don't overwrite existing with empty)
+        if CfTurnKeyId <> '' then
+          UpdateEnvKey(Lines, 'CF_TURN_KEY_ID', CfTurnKeyId);
+        if CfTurnApiToken <> '' then
+          UpdateEnvKey(Lines, 'CF_TURN_API_TOKEN', CfTurnApiToken);
       end
       else
       begin
@@ -248,9 +286,10 @@ begin
         end;
 
         Lines.Add('GEMINI_API_KEY=' + GeminiKey);
-        { USE_HOSTED_API is written for future use — the host will read this }
-        { once the hosted Gemini proxy is built for Pro users. }
         Lines.Add('USE_HOSTED_API=' + UseHosted);
+        Lines.Add('');
+        Lines.Add('CF_TURN_KEY_ID=' + CfTurnKeyId);
+        Lines.Add('CF_TURN_API_TOKEN=' + CfTurnApiToken);
       end;
 
       Lines.SaveToFile(EnvFile);

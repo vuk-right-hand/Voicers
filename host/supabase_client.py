@@ -68,7 +68,10 @@ async def check_subscription_blocked_async() -> bool:
     return await asyncio.to_thread(check_subscription_blocked)
 
 
-def upsert_session() -> str:
+def upsert_session(
+    ice_servers: list | None = None,
+    turn_status: str = "none",
+) -> str:
     """Create or update the session row. Returns session ID.
 
     Retries with backoff on network errors — on boot the Registry Run key
@@ -91,7 +94,12 @@ def upsert_session() -> str:
                 json={
                     "user_id": USER_ID,
                     "pc_status": "waiting",
-                    "signaling_data": {"type": "host-ready", "host_id": USER_ID},
+                    "signaling_data": {
+                        "type": "host-ready",
+                        "host_id": USER_ID,
+                        "ice_servers": ice_servers,
+                        "turn_status": turn_status,
+                    },
                 },
             )
             resp.raise_for_status()
@@ -144,8 +152,11 @@ async def update_pc_status_async(session_id: str, status: str) -> None:
     await asyncio.to_thread(update_pc_status, session_id, status)
 
 
-async def upsert_session_async() -> str:
-    return await asyncio.to_thread(upsert_session)
+async def upsert_session_async(
+    ice_servers: list | None = None,
+    turn_status: str = "none",
+) -> str:
+    return await asyncio.to_thread(upsert_session, ice_servers, turn_status)
 
 
 async def subscribe_signaling(session_id: str, callback: Callable[[dict], None]):

@@ -26,6 +26,11 @@ if "%SUPABASE_URL%"=="" (
     echo ERROR: SUPABASE_URL not found in host\.env
     exit /b 1
 )
+:: Cloudflare TURN keys (optional — only needed for Pro builds)
+set CF_TURN_KEY_ID=
+for /f "tokens=1,* delims==" %%a in ('findstr /b "CF_TURN_KEY_ID" "..\host\.env"') do set CF_TURN_KEY_ID=%%b
+set CF_TURN_API_TOKEN=
+for /f "tokens=1,* delims==" %%a in ('findstr /b "CF_TURN_API_TOKEN" "..\host\.env"') do set CF_TURN_API_TOKEN=%%b
 
 echo ═══════════════════════════════════════════
 echo   Voicer Installer Build
@@ -93,6 +98,8 @@ for %%f in (server.py webrtc_host.py screen.py input.py gemini_live.py supabase_
     echo USER_ID=
     echo GEMINI_API_KEY=
     echo USE_HOSTED_API=false
+    echo CF_TURN_KEY_ID=!CF_TURN_KEY_ID!
+    echo CF_TURN_API_TOKEN=!CF_TURN_API_TOKEN!
 ) > "%BUNDLE%\host\.env.template"
 
 :: Copy start scripts

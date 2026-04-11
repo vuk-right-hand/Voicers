@@ -12,6 +12,7 @@ import os
 import time
 from fractions import Fraction
 
+import httpx
 import mss
 import numpy as np
 import pyautogui
@@ -36,25 +37,98 @@ from supabase_client import (
     subscribe_signaling,
     check_subscription_blocked_async,
     USER_ID,
+    SUPABASE_KEY,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _build_rtc_config() -> RTCConfiguration:
-    """Build RTCConfiguration with STUN always on, TURN from .env if set."""
+SITE_URL = os.environ.get("SITE_URL", "https://voicers.vercel.app")
+
+
+def _fetch_cf_direct() -> list:
+    """Call Cloudflare TURN API directly (BYOK path)."""
+    key_id = os.environ.get("CF_TURN_KEY_ID", "").strip()
+    api_token = os.environ.get("CF_TURN_API_TOKEN", "").strip()
+    url = (
+        f"https://rtc.live.cloudflare.com/v1/turn/keys/"
+        f"{key_id}/credentials/generate-ice-servers"
+    )
+    resp = httpx.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+        json={"ttl": 86400},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    return resp.json()["iceServers"]
+
+
+def _fetch_cf_hosted() -> list:
+    """Call our server-side API for TURN credentials (Pro path)."""
+    resp = httpx.post(
+        f"{SITE_URL}/api/turn-credentials",
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"user_id": USER_ID},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    return resp.json()["iceServers"]
+
+
+async def _generate_cf_ice_servers() -> tuple[list | None, str]:
+    """Generate ephemeral Cloudflare TURN credentials.
+
+    Returns (ice_servers_json, turn_status) where turn_status is
+    "active", "error", or "none".
+
+    Two paths:
+    - BYOK: calls Cloudflare directly using local CF_TURN_KEY_ID/CF_TURN_API_TOKEN
+    - Pro (USE_HOSTED_API=true): calls our server-side API which holds the CF secret
+    """
+    use_hosted = os.environ.get("USE_HOSTED_API", "false").strip().lower() == "true"
+    has_local_keys = (
+        os.environ.get("CF_TURN_KEY_ID", "").strip()
+        and os.environ.get("CF_TURN_API_TOKEN", "").strip()
+    )
+
+    if not use_hosted and not has_local_keys:
+        return None, "none"
+
+    try:
+        if use_hosted:
+            ice_servers = await asyncio.to_thread(_fetch_cf_hosted)
+            logger.info("TURN credentials from hosted API (%d servers)", len(ice_servers))
+        else:
+            ice_servers = await asyncio.to_thread(_fetch_cf_direct)
+            logger.info("TURN credentials from Cloudflare direct (%d servers)", len(ice_servers))
+        return ice_servers, "active"
+    except Exception as exc:
+        logger.warning("TURN credential generation failed: %s", exc)
+        return None, "error"
+
+
+def _build_rtc_config(ice_servers_json: list | None = None) -> RTCConfiguration:
+    """Build RTCConfiguration with STUN always on, Cloudflare TURN if available."""
     ice_servers = [
         RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
         RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
     ]
-    turn_url = os.environ.get("TURN_URL")
-    if turn_url:
-        ice_servers.append(RTCIceServer(
-            urls=[turn_url],
-            username=os.environ.get("TURN_USERNAME", ""),
-            credential=os.environ.get("TURN_CREDENTIAL", ""),
-        ))
-        logger.info("TURN server configured: %s", turn_url)
+    if ice_servers_json:
+        for server in ice_servers_json:
+            urls = server.get("urls", [])
+            username = server.get("username")
+            credential = server.get("credential")
+            if username and credential:
+                ice_servers.append(RTCIceServer(
+                    urls=urls, username=username, credential=credential,
+                ))
     return RTCConfiguration(iceServers=ice_servers)
 
 
@@ -135,6 +209,11 @@ class WebRTCHost:
         # Subscription blocked flag (checked on start, rechecked on connect)
         self._subscription_blocked: bool = False
 
+        # Cloudflare TURN credentials (refreshed every 12h)
+        self._ice_servers_json: list | None = None
+        self._turn_status: str = "none"
+        self._turn_refresh_task: asyncio.Task | None = None
+
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
         try:
@@ -144,7 +223,13 @@ class WebRTCHost:
             logger.warning("Could not check subscription, allowing connection")
             self._subscription_blocked = False
 
-        self.session_id = await upsert_session_async()
+        # Generate Cloudflare TURN credentials before creating session
+        self._ice_servers_json, self._turn_status = await _generate_cf_ice_servers()
+
+        self.session_id = await upsert_session_async(
+            ice_servers=self._ice_servers_json,
+            turn_status=self._turn_status,
+        )
         self._running = True
 
         # Subscribe to Realtime for signaling (now async, returns a task)
@@ -152,10 +237,16 @@ class WebRTCHost:
             self.session_id, self._on_signaling_data
         )
 
+        # Background credential refresh every 12h (only if CF keys are configured)
+        if self._turn_status != "none":
+            self._turn_refresh_task = asyncio.create_task(
+                self._maintain_turn_credentials()
+            )
+
         screen_w, screen_h = get_screen_size()
         logger.info(
-            "Host ready. Session: %s, Screen: %dx%d. Waiting for phone offer...",
-            self.session_id, screen_w, screen_h,
+            "Host ready. Session: %s, Screen: %dx%d, TURN: %s. Waiting for phone offer...",
+            self.session_id, screen_w, screen_h, self._turn_status,
         )
 
     def _on_signaling_data(self, data: dict):
@@ -182,6 +273,8 @@ class WebRTCHost:
                 await write_signaling_async(self.session_id, {
                     "type": "host-ready",
                     "host_id": USER_ID,
+                    "ice_servers": self._ice_servers_json,
+                    "turn_status": self._turn_status,
                 })
 
     async def _safe_handle_ice_candidate(self, candidate_str: str):
@@ -212,7 +305,7 @@ class WebRTCHost:
         if self.pc:
             await self.pc.close()
 
-        rtc_config = _build_rtc_config()
+        rtc_config = _build_rtc_config(self._ice_servers_json)
         logger.info("ICE servers: %s", [s.urls for s in rtc_config.iceServers])
         self.pc = RTCPeerConnection(configuration=rtc_config)
         self._ice_queue = []
@@ -246,6 +339,8 @@ class WebRTCHost:
                 await write_signaling_async(self.session_id, {
                     "type": "host-ready",
                     "host_id": USER_ID,
+                    "ice_servers": self._ice_servers_json,
+                    "turn_status": self._turn_status,
                 })
 
         # Set remote description (the offer)
@@ -526,10 +621,32 @@ class WebRTCHost:
             }))
             await asyncio.sleep(0.05)  # 20 Hz
 
+    async def _maintain_turn_credentials(self):
+        """Refresh Cloudflare TURN credentials every 12 hours."""
+        while self._running:
+            await asyncio.sleep(43200)  # 12 hours
+            if not self._running:
+                break
+            ice_servers, status = await _generate_cf_ice_servers()
+            self._ice_servers_json = ice_servers
+            self._turn_status = status
+            # Only rewrite signaling if not connected — avoids firing the phone's
+            # Realtime subscription mid-session (which could trigger a spurious reconnect).
+            if self.session_id and (not self.pc or self.pc.connectionState != "connected"):
+                await write_signaling_async(self.session_id, {
+                    "type": "host-ready",
+                    "host_id": USER_ID,
+                    "ice_servers": self._ice_servers_json,
+                    "turn_status": self._turn_status,
+                })
+            logger.info("TURN credentials refreshed (status=%s)", self._turn_status)
+
     async def stop(self):
         """Clean shutdown."""
         self._running = False
         self._clipboard_watcher.stop()
+        if self._turn_refresh_task:
+            self._turn_refresh_task.cancel()
         if self.pc:
             await self.pc.close()
         if self._channel:

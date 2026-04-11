@@ -24,7 +24,7 @@ export interface Session {
 // --- WebRTC Signaling ---
 
 export type SignalingData =
-  | { type: "host-ready"; host_id: string }
+  | { type: "host-ready"; host_id: string; ice_servers?: RTCIceServer[]; turn_status?: "active" | "error" | "none" }
   | { type: "offer"; sdp: string; from: "phone" }
   | { type: "answer"; sdp: string; from: "host" }
   | { type: "ice-candidate"; candidate: string; from: "host" | "phone" }
