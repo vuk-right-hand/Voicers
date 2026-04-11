@@ -1,0 +1,35 @@
+name: Build macOS Installer
+
+# Manual trigger only — run from GitHub Actions tab
+on:
+  workflow_dispatch:
+
+jobs:
+  build-dmg:
+    runs-on: macos-14  # Apple Silicon (M1) — matches our arm64 build
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create host/.env from secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CF_TURN_KEY_ID: ${{ secrets.CF_TURN_KEY_ID }}
+          CF_TURN_API_TOKEN: ${{ secrets.CF_TURN_API_TOKEN }}
+        run: |
+          printf "SUPABASE_URL=%s\n" "$SUPABASE_URL" > host/.env
+          printf "SUPABASE_SERVICE_ROLE_KEY=%s\n" "$SUPABASE_SERVICE_ROLE_KEY" >> host/.env
+          printf "CF_TURN_KEY_ID=%s\n" "$CF_TURN_KEY_ID" >> host/.env
+          printf "CF_TURN_API_TOKEN=%s\n" "$CF_TURN_API_TOKEN" >> host/.env
+
+      - name: Build DMG
+        working-directory: installer-mac
+        run: bash build.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoicerInstaller-macOS
+          path: installer-mac/VoicerInstaller.dmg
+          retention-days: 90

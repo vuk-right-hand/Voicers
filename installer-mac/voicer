@@ -1,0 +1,78 @@
+#!/bin/bash
+# ─── Voicer Desktop Host — macOS Entry Point ────────────────────────────────
+# Two modes:
+#   (no arg)    → Setup wizard + start daemon via launchctl (user double-click)
+#   "daemon"    → Run uvicorn directly (launchd calls this)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_DIR="$HOME/.voicer"
+ENV_FILE="$CONFIG_DIR/.env"
+PLIST="$HOME/Library/LaunchAgents/com.voicer.host.plist"
+UID_NUM="$(id -u)"
+
+# ── App Translocation Guard ─────────────────────────────────────────────────
+# If user runs from DMG or Downloads, macOS mounts at a random temporary
+# path (/private/var/folders/.../AppTranslocation/...) that disappears on
+# reboot. Baking this path into the launchd plist = silent death on restart.
+if [[ "$DIR" == *"/AppTranslocation/"* ]] || [[ "$DIR" == *"/Volumes/"* ]]; then
+    osascript -e 'display alert "Installation Required" message "Please drag Voicer to your Applications folder before running it." as critical'
+    exit 1
+fi
+
+# ── DAEMON MODE (launched by launchd with "daemon" argument) ────────────────
+if [ "$1" == "daemon" ]; then
+    PYTHON="$DIR/Resources/python/bin/python3"
+    HOST_DIR="$DIR/Resources/host"
+
+    # Sanity check — don't crash-loop if .env is missing/empty
+    if [ ! -s "$ENV_FILE" ]; then
+        echo "$(date): ERROR: $ENV_FILE missing or empty. Run Voicer.app to set up."
+        exit 0  # Clean exit — KeepAlive.SuccessfulExit:false won't restart
+    fi
+
+    # Port conflict check — don't crash-loop if 8000 is occupied
+    if lsof -i :8000 -t >/dev/null 2>&1; then
+        echo "$(date): Port 8000 already in use — Voicer daemon already running?"
+        exit 0  # Clean exit
+    fi
+
+    # Export .env vars safely — values are single-quoted by setup.sh,
+    # so we strip quotes and export without shell expansion of $ chars
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val#\'}" ; val="${val%\'}"  # strip surrounding single quotes
+        export "$key=$val"
+    done < "$ENV_FILE"
+
+    echo "$(date): Voicer daemon starting on 127.0.0.1:8000"
+    cd "$HOST_DIR"
+    exec "$PYTHON" -m uvicorn server:app --host 127.0.0.1 --port 8000
+fi
+
+# ── SETUP MODE (launched by user double-click, no argument) ─────────────────
+
+# First-run: show setup wizard if no .env exists
+if [ ! -f "$ENV_FILE" ]; then
+    bash "$DIR/Resources/setup.sh" "$DIR/Resources"
+    if [ $? -ne 0 ]; then
+        exit 1  # User cancelled setup
+    fi
+fi
+
+# Stop old daemon (if running with old code after drag-replace update).
+# KeepAlive.SuccessfulExit:false auto-restarts on SIGTERM (exit 143),
+# so no explicit kickstart needed — avoids port-clash race condition.
+launchctl kill SIGTERM "gui/$UID_NUM/com.voicer.host" 2>/dev/null
+
+# Bootstrap plist if not already loaded (first run / after bootout)
+if ! launchctl print "gui/$UID_NUM/com.voicer.host" >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+    launchctl kickstart "gui/$UID_NUM/com.voicer.host"
+fi
+
+# Show confirmation and exit — dock icon bounces once and disappears
+osascript -e 'display notification "Voicer host is running" with title "Voicer"'
+exit 0

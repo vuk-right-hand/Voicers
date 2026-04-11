@@ -27,7 +27,11 @@ from input import (
     get_cursor_pos,
     type_text_paste_async, get_clipboard_async,
 )
-from clipboard_watcher import ClipboardWatcher
+import sys
+if sys.platform == "darwin":
+    from clipboard_watcher_mac import ClipboardWatcher
+else:
+    from clipboard_watcher import ClipboardWatcher
 from gemini_live import GeminiLive
 from screen import get_screen_size
 from supabase_client import (

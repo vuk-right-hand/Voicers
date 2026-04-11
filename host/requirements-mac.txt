@@ -1,0 +1,7 @@
+# Voicer Desktop Host — macOS dependencies
+# Inherits everything from requirements.txt + macOS-specific packages
+
+-r requirements.txt
+
+# macOS-specific: native clipboard watcher (avoids pbpaste subprocess polling)
+pyobjc-framework-Cocoa>=10.0

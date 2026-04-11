@@ -128,19 +128,19 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  // Skip Gemini key page unless user is on BYOK plan
-  if (PageID = GeminiPage.ID) and (UserPlan <> 'byok') then
+  // Show Gemini + TURN pages for BYOK and Free (both bring their own keys).
+  // Pro skips — uses hosted API.
+  if (PageID = GeminiPage.ID) and (UserPlan = 'pro') then
     Result := True;
-  // Skip TURN page unless user is on BYOK plan
-  if (PageID = TurnPage.ID) and (UserPlan <> 'byok') then
+  if (PageID = TurnPage.ID) and (UserPlan = 'pro') then
     Result := True;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  // Validate Gemini key is not empty for BYOK
-  if (CurPageID = GeminiPage.ID) and (UserPlan = 'byok') then
+  // Validate Gemini key is not empty for BYOK and Free
+  if (CurPageID = GeminiPage.ID) and ((UserPlan = 'byok') or (UserPlan = 'free')) then
   begin
     if Trim(GeminiPage.Values[0]) = '' then
     begin
@@ -220,22 +220,17 @@ begin
     UserId := ReadActivationFile;
 
     // Read Cloudflare TURN values
-    // BYOK: user pastes keys in installer. Pro: no CF keys on disk (served via API).
-    // Free/dev: read from template if present (dev builds only).
-    if UserPlan = 'byok' then
-    begin
-      CfTurnKeyId := Trim(TurnPage.Values[0]);
-      CfTurnApiToken := Trim(TurnPage.Values[1]);
-    end
-    else if UserPlan = 'pro' then
+    // BYOK + Free: user pastes keys in installer. Pro: no CF keys (served via API).
+    if UserPlan = 'pro' then
     begin
       CfTurnKeyId := '';
       CfTurnApiToken := '';
     end
     else
     begin
-      CfTurnKeyId := ReadKeyFromTemplate('CF_TURN_KEY_ID');
-      CfTurnApiToken := ReadKeyFromTemplate('CF_TURN_API_TOKEN');
+      // BYOK and Free both provide their own keys
+      CfTurnKeyId := Trim(TurnPage.Values[0]);
+      CfTurnApiToken := Trim(TurnPage.Values[1]);
     end;
 
     EnvFile := ExpandConstant('{app}\host\.env');
@@ -267,21 +262,16 @@ begin
         Lines.Add('USER_ID=' + UserId);
         Lines.Add('');
 
-        // Plan-based config: BYOK users provide their own key, Pro uses hosted API
-        if UserPlan = 'byok' then
-        begin
-          GeminiKey := Trim(GeminiPage.Values[0]);
-          UseHosted := 'false';
-        end
-        else if UserPlan = 'pro' then
+        // Plan-based config: Pro uses hosted API, BYOK + Free provide their own key
+        if UserPlan = 'pro' then
         begin
           GeminiKey := '';
           UseHosted := 'true';
         end
         else
         begin
-          // Free dev — they configure everything themselves
-          GeminiKey := '';
+          // BYOK and Free both provide their own Gemini key
+          GeminiKey := Trim(GeminiPage.Values[0]);
           UseHosted := 'false';
         end;
 
