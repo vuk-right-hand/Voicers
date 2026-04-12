@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/payment-reminder",
-      "schedule": "0 * * * *"
+      "schedule": "0 9 * * *"
     }
   ]
 }
