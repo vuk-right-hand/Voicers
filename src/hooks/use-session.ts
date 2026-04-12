@@ -197,6 +197,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   disconnect: () => {
+    // Tell the host we're leaving so it can tear down its PC and republish
+    // host-ready immediately. Without this, the host waits ~30s for aioice's
+    // ICE consent-freshness check to expire, during which the dashboard shows
+    // "Desktop host is offline" and blocks instant reconnects.
+    const { dataChannel } = get();
+    if (dataChannel?.readyState === "open") {
+      try {
+        dataChannel.send(JSON.stringify({ type: "bye" }));
+      } catch {
+        // Channel may have just closed — host will fall back to consent expiry
+      }
+    }
+
     _close?.();
     _close = null;
     if (_disconnectTimer) {

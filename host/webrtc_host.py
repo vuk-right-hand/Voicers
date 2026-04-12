@@ -25,7 +25,7 @@ from input import (
     tap, type_text, scroll, execute_command,
     mousemove_relative, mousedown, mouseup, click, double_click,
     get_cursor_pos,
-    type_text_paste_async, get_clipboard_async,
+    type_text_paste_async, get_clipboard_async, copy_selection_async,
 )
 import sys
 if sys.platform == "darwin":
@@ -329,23 +329,7 @@ class WebRTCHost:
         # Handle connection state changes
         @self.pc.on("connectionstatechange")
         async def on_connection_state():
-            state = self.pc.connectionState
-            logger.info("Connection state: %s", state)
-            if state == "connected":
-                await update_pc_status_async(self.session_id, "connected")
-            elif state == "disconnected":
-                # Transient — WebRTC may self-heal (WiFi jitter, brief packet loss).
-                # Don't tear down; let the ICE agent attempt recovery.
-                logger.info("Connection disconnected (transient) — waiting for recovery")
-            elif state in ("failed", "closed"):
-                await update_pc_status_async(self.session_id, "waiting")
-                # Reset to host-ready for reconnection
-                await write_signaling_async(self.session_id, {
-                    "type": "host-ready",
-                    "host_id": USER_ID,
-                    "ice_servers": self._ice_servers_json,
-                    "turn_status": self._turn_status,
-                })
+            await self._on_connection_state(self.pc.connectionState)
 
         # Set remote description (the offer)
         offer = RTCSessionDescription(sdp=sdp, type="offer")
@@ -491,6 +475,14 @@ class WebRTCHost:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._send_clipboard(channel))
 
+            elif cmd_type == "copy-selection":
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._copy_selection(channel))
+
+            elif cmd_type == "bye":
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._on_bye())
+
             else:
                 logger.warning("Unknown command type: %s", cmd_type)
 
@@ -595,6 +587,64 @@ class WebRTCHost:
             channel.send(json.dumps({"type": "voice-status", "status": "idle"}))
 
         logger.info("Voice session stopped")
+
+    async def _on_bye(self):
+        """Explicit phone-initiated disconnect.
+
+        Called when the phone sends a `bye` command over the data channel
+        (user tapped Disconnect in the settings modal). Tears down the PC
+        and republishes host-ready immediately, bypassing the 30+ second
+        wait for aioice's ICE consent-freshness check to expire. Without
+        this, the dashboard shows "Desktop host is offline" right up until
+        consent times out, blocking instant reconnects.
+        """
+        logger.info("Bye received — tearing down and republishing host-ready")
+        if self.pc:
+            try:
+                await self.pc.close()
+            except Exception:
+                logger.exception("Error closing PC on bye")
+            self.pc = None
+        await update_pc_status_async(self.session_id, "waiting")
+        await write_signaling_async(self.session_id, {
+            "type": "host-ready",
+            "host_id": USER_ID,
+            "ice_servers": self._ice_servers_json,
+            "turn_status": self._turn_status,
+        })
+
+    async def _on_connection_state(self, state: str):
+        """Handle PC connectionState transitions.
+
+        Extracted from the inline @pc.on handler so unit tests can drive it
+        directly without standing up a real RTCPeerConnection.
+        """
+        logger.info("Connection state: %s", state)
+        if state == "connected":
+            await update_pc_status_async(self.session_id, "connected")
+        elif state == "disconnected":
+            # Transient — WebRTC may self-heal (WiFi jitter, brief packet loss).
+            # Don't tear down; let the ICE agent attempt recovery.
+            logger.info("Connection disconnected (transient) — waiting for recovery")
+        elif state in ("failed", "closed"):
+            await update_pc_status_async(self.session_id, "waiting")
+            await write_signaling_async(self.session_id, {
+                "type": "host-ready",
+                "host_id": USER_ID,
+                "ice_servers": self._ice_servers_json,
+                "turn_status": self._turn_status,
+            })
+
+    async def _copy_selection(self, channel):
+        """Fire Ctrl+C and wait for the clipboard to actually update before replying.
+
+        Eliminates the off-by-one race that snapshot+sleep on the phone side
+        couldn't fix: pyautogui returns the moment keystrokes are queued, but
+        the foreground app may take longer to commit the copy to the clipboard.
+        """
+        text = await copy_selection_async()
+        if channel.readyState == "open":
+            channel.send(json.dumps({"type": "clipboard", "text": text}))
 
     async def _send_clipboard(self, channel):
         """Read PC clipboard (with lock) and send it to the phone."""

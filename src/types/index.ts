@@ -45,7 +45,9 @@ export type PhoneCommand =
   | { type: "click" }
   | { type: "double-click" }
   | { type: "moveto"; x: number; y: number }
-  | { type: "get-clipboard" };
+  | { type: "get-clipboard" }
+  | { type: "copy-selection" }
+  | { type: "bye" };
 // Note: binary ArrayBuffer (raw PCM audio) is also sent but not typed here
 
 // Host → Phone (via data channel)

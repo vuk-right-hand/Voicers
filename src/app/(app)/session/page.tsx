@@ -115,12 +115,10 @@ export default function SessionPage() {
       setFetchedText("");
     }, TOAST_DISMISS_MS);
 
-    // Fire Ctrl+C on the PC
-    sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "c"] } });
-    await new Promise((r) => setTimeout(r, 150));
-
-    // Fetch clipboard and stash for synchronous read
-    sendCommand({ type: "get-clipboard" });
+    // Single host-side op: fires Ctrl+C and waits for the clipboard to settle
+    // before responding. Eliminates the off-by-one race where the previous
+    // gesture's selection ended up in fetchedText.
+    sendCommand({ type: "copy-selection" });
     const text = await awaitClipboard();
     setFetchedText(text);
   };
@@ -166,13 +164,11 @@ export default function SessionPage() {
   };
 
   const handleSelectAll = async () => {
-    // Select All on PC, then re-copy so fetchedText has the full selection
+    // Select All on PC, then copy-selection so fetchedText has the full selection
     sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "a"] } });
     await new Promise((r) => setTimeout(r, 200)); // let selection land
     setFetchedText("");
-    sendCommand({ type: "command", action: "shortcut", payload: { keys: ["ctrl", "c"] } });
-    await new Promise((r) => setTimeout(r, 150));
-    sendCommand({ type: "get-clipboard" });
+    sendCommand({ type: "copy-selection" });
     const text = await awaitClipboard();
     setFetchedText(text);
     // Reset dismiss timer so user has time to tap Copy

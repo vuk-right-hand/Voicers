@@ -57,6 +57,25 @@ async def get_clipboard_async() -> str:
     async with _get_clipboard_lock():
         return await asyncio.to_thread(pyperclip.paste)
 
+
+async def copy_selection_async(timeout_ms: int = 500) -> str:
+    """Send Ctrl+C and wait for the OS clipboard to actually update.
+
+    Snapshots clipboard, fires the hotkey, then polls until the content
+    changes or the timeout expires. Eliminates the off-by-one race where
+    pyperclip.paste() runs before the foreground app has processed Ctrl+C.
+    """
+    async with _get_clipboard_lock():
+        before = await asyncio.to_thread(pyperclip.paste)
+        await asyncio.to_thread(pyautogui.hotkey, "ctrl", "c")
+        deadline = time.monotonic() + (timeout_ms / 1000)
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            current = await asyncio.to_thread(pyperclip.paste)
+            if current != before:
+                return current
+        return await asyncio.to_thread(pyperclip.paste)
+
 # Disable fail-safe — tapping the extreme edge of the phone screen sends (0,0)
 # which triggers FailSafeException and crashes the host.
 pyautogui.FAILSAFE = False
