@@ -12,12 +12,14 @@ Pipeline:
   - Caller flushes interim_buffer as is_final=True on voice-stop
 """
 import asyncio
+import datetime
 import logging
 import os
 import re
 import time
 from typing import Callable
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -38,6 +40,67 @@ _HAS_LATIN_OR_DIGIT = re.compile(r"[a-zA-Z0-9]")
 # Gemini's input_audio_transcription degrades after 20-40s of continuous
 # streaming — proactive activityEnd→activityStart resets the pipeline.
 _FLUSH_INTERVAL_S = 15
+
+
+def _fetch_hosted_gemini_token() -> tuple[str, float]:
+    """Fetch a Pro-tier ephemeral Gemini token from Vercel.
+
+    Returns (token, monotonic_expire_deadline_seconds).
+
+    The Vercel master key never touches the user's machine — we get a
+    fresh 30-min token per session and connect direct to Google's WebSocket.
+    Errors are converted to RuntimeError so they don't bubble out as raw
+    httpx exceptions and tear down the asyncio task / WebRTC channel.
+    """
+    site_url = os.environ.get("SITE_URL", "https://voicers.vercel.app")
+    user_id = os.environ.get("USER_ID")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not user_id:
+        raise RuntimeError(
+            "USE_HOSTED_API=true but USER_ID is not set in environment — "
+            "re-run the installer with a valid activation file"
+        )
+    if not supabase_key:
+        raise RuntimeError(
+            "USE_HOSTED_API=true but SUPABASE_SERVICE_ROLE_KEY is not set — "
+            "installer bake-in failed, reinstall"
+        )
+    try:
+        resp = httpx.post(
+            f"{site_url}/api/gemini-token",
+            headers={
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+            },
+            json={"user_id": user_id},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("token")
+        if not token:
+            raise RuntimeError(
+                f"Pro token response missing 'token' field: {data}"
+            )
+        expire_iso = data.get("expireTime")
+        seconds_left = 30 * 60
+        if expire_iso:
+            try:
+                wall_expire = datetime.datetime.fromisoformat(
+                    expire_iso.replace("Z", "+00:00")
+                )
+                seconds_left = (
+                    wall_expire - datetime.datetime.now(datetime.timezone.utc)
+                ).total_seconds()
+            except Exception:
+                pass
+        return token, time.monotonic() + max(60.0, seconds_left)
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(
+            f"Failed to fetch Pro token: {e.response.status_code} - {e.response.text}"
+        )
+    except httpx.RequestError as e:
+        raise RuntimeError(f"Network error reaching Vercel API: {e}")
 
 
 class GeminiLive:
@@ -61,6 +124,7 @@ class GeminiLive:
         self._send_task: asyncio.Task | None = None
         self._recv_task: asyncio.Task | None = None
         self._flush_task: asyncio.Task | None = None
+        self._token_expiry_task: asyncio.Task | None = None
         self._active = False
         self._restarting = False
         self._session = None
@@ -68,19 +132,33 @@ class GeminiLive:
         self.interim_buffer = ""
         self._last_activity_start: float = 0.0
         self._resumption_handle: str | None = None  # for session resumption
+        self._token_expires_at: float | None = None  # hosted-mode only
 
     async def start(self, _preserve_buffer: bool = False) -> None:
         """Open Gemini Live session and start send/recv/flush background tasks."""
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY not set in environment")
+        use_hosted = os.environ.get("USE_HOSTED_API", "false").strip().lower() == "true"
+
+        if use_hosted:
+            # Pro tier — fetch ephemeral token from Vercel, connect via v1alpha
+            api_key, self._token_expires_at = await asyncio.to_thread(
+                _fetch_hosted_gemini_token
+            )
+            client = genai.Client(
+                api_key=api_key,
+                http_options={"api_version": "v1alpha"},
+            )
+        else:
+            # BYOK / Free — local key from .env
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError("GEMINI_API_KEY not set in environment")
+            client = genai.Client(api_key=api_key)
+            self._token_expires_at = None
 
         self._api_key = api_key
         self._active = True
         if not _preserve_buffer:
             self.interim_buffer = ""
-
-        client = genai.Client(api_key=api_key)
 
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -118,6 +196,10 @@ class GeminiLive:
         self._send_task = loop.create_task(self._send_loop(), name="gemini-send")
         self._recv_task = loop.create_task(self._recv_loop(), name="gemini-recv")
         self._flush_task = loop.create_task(self._flush_loop(), name="gemini-flush")
+        if self._token_expires_at is not None:
+            self._token_expiry_task = loop.create_task(
+                self._token_expiry_loop(), name="gemini-token-expiry"
+            )
 
         resumption_status = "resuming" if self._resumption_handle else "new"
         logger.info("Gemini Live session started (model=%s, VAD=off, flush=%ds, %s)",
@@ -148,7 +230,7 @@ class GeminiLive:
         except asyncio.QueueFull:
             pass
 
-        tasks = [t for t in [self._send_task, self._recv_task, self._flush_task] if t]
+        tasks = [t for t in [self._send_task, self._recv_task, self._flush_task, self._token_expiry_task] if t]
         for t in tasks:
             t.cancel()
         if tasks:
@@ -170,7 +252,7 @@ class GeminiLive:
         self._restarting = True
 
         self._active = False
-        tasks = [t for t in [self._send_task, self._recv_task, self._flush_task] if t]
+        tasks = [t for t in [self._send_task, self._recv_task, self._flush_task, self._token_expiry_task] if t]
         for t in tasks:
             t.cancel()
         if tasks:
@@ -178,6 +260,7 @@ class GeminiLive:
         self._send_task = None
         self._recv_task = None
         self._flush_task = None
+        self._token_expiry_task = None
 
         if self._session_ctx is not None:
             try:
@@ -223,6 +306,36 @@ class GeminiLive:
         except asyncio.CancelledError:
             pass
         logger.info("Send loop ended — %d chunks sent total", chunks_sent)
+
+    async def _token_expiry_loop(self) -> None:
+        """Hosted-mode only: trigger restart() ~60s before the ephemeral token's
+        expire_time so we mint a fresh one before frame flow stops at the cap.
+
+        Without this, a Pro session left open >30 min would silently die at
+        expire_time with no GoAway and therefore no normal restart trigger.
+        """
+        if self._token_expires_at is None:
+            return
+        try:
+            while self._active:
+                sleep_for = max(10.0, self._token_expires_at - time.monotonic() - 60.0)
+                await asyncio.sleep(sleep_for)
+                if not self._active:
+                    break
+                if time.monotonic() >= self._token_expires_at - 60.0:
+                    logger.info(
+                        "Gemini token nearing expiry — triggering restart for fresh token"
+                    )
+                    # _on_session_dead schedules restart(), which cancels this
+                    # task via asyncio.gather — we may be cancelled before the
+                    # break runs. Either path exits the loop cleanly. Also safe
+                    # if a GoAway fires in the same window: restart() is guarded
+                    # by self._restarting in webrtc_host so only one runs.
+                    if self._on_session_dead:
+                        self._on_session_dead()
+                    break
+        except asyncio.CancelledError:
+            pass
 
     async def _flush_loop(self) -> None:
         """Periodically cycle activityEnd→activityStart to reset the
