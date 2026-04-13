@@ -91,25 +91,33 @@ async function sendPostCheckoutEmail(userId: string) {
         </td></tr>
         <tr><td style="padding-bottom:20px;">
           <p style="margin:0;font-size:14px;line-height:1.6;color:#a1a1aa;">
-            Open this link on the Windows machine you want to control.<br>
+            Open this link on the Windows or macOS machine you want to control.<br>
             Your installer will download automatically.
           </p>
         </td></tr>
         <tr><td style="padding-bottom:12px;">
           <a href="${downloadUrl}"
              style="display:inline-block;background:#ffffff;color:#000000;font-size:15px;font-weight:600;padding:14px 32px;border-radius:12px;text-decoration:none;">
-            Download for Windows
+            Download installer
           </a>
         </td></tr>
         <tr><td style="padding-bottom:12px;">
           <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
-            Your browser or Windows may flag the download as suspicious &mdash; this is standard for any new app.
-            Click through to install. Voicer sets up a small background service so your desktop is always
-            ready when you open the app on your phone.
+            <strong style="color:#a1a1aa;">Windows:</strong> SmartScreen may show &ldquo;Windows protected your PC / Suspicious Download&rdquo; &mdash;
+            click <strong>More info &rarr; Run / Download anyway</strong>. The installer isn&rsquo;t &ldquo;signed&rdquo; yet
+            (cert is ~$300/yr, we skipped :)).
           </p>
         </td></tr>
-        <tr><td style="padding-bottom:8px;">
-          <p style="margin:0;font-size:12px;color:#52525b;">macOS &mdash; coming soon</p>
+        <tr><td style="padding-bottom:12px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
+            <strong style="color:#a1a1aa;">macOS:</strong> may say &ldquo;cannot be opened, unidentified developer&rdquo; &mdash;
+            right-click the .dmg &rarr; <strong>Open &rarr; Open</strong>. Only needed the first time.
+          </p>
+        </td></tr>
+        <tr><td style="padding-bottom:12px;">
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">
+            Voicer sets up a small background service so your desktop is always ready when you open the app on your phone.
+          </p>
         </td></tr>
         <tr><td style="padding-bottom:32px;">
           <p style="margin:0;font-size:12px;line-height:1.6;color:#71717a;">

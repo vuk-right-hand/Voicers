@@ -4,10 +4,15 @@ import { useEffect, useState, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import JSZip from "jszip";
 
-const INSTALLER_URL =
+const WINDOWS_INSTALLER_URL =
   process.env.NEXT_PUBLIC_INSTALLER_URL ??
-  "https://github.com/vuk-right-hand/Voicers/releases/latest/download/VoicerSetup.exe";
+  "https://pub-aa1b48d86cfc49d69effbf73a4f10cee.r2.dev/VoicerSetup.exe";
 
+const MAC_INSTALLER_URL =
+  process.env.NEXT_PUBLIC_MAC_INSTALLER_URL ??
+  "https://pub-ab293b0d3d6d4fd188ae2c2155f079d0.r2.dev/VoicerInstaller.dmg";
+
+type Platform = "windows" | "mac";
 type Stage = "validating" | "downloading" | "bundling" | "done" | "error" | "mobile";
 
 function isMobileUA(): boolean {
@@ -15,6 +20,13 @@ function isMobileUA(): boolean {
   return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
     navigator.userAgent
   );
+}
+
+function detectPlatform(): Platform {
+  if (typeof navigator === "undefined") return "windows";
+  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
+    ? "mac"
+    : "windows";
 }
 
 function DownloadFlow() {
@@ -26,6 +38,7 @@ function DownloadFlow() {
   const [stage, setStage] = useState<Stage>("validating");
   const [progress, setProgress] = useState(0); // 0-100
   const [errorMsg, setErrorMsg] = useState("");
+  const [platform, setPlatform] = useState<Platform>("windows");
 
   const uuidRegex =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -42,18 +55,21 @@ function DownloadFlow() {
       setStage("mobile");
       return;
     }
+    const p = detectPlatform();
+    setPlatform(p);
     startedRef.current = true;
-    bundleAndDownload(uid);
+    bundleAndDownload(uid, p);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isValid, uid]);
 
-  async function bundleAndDownload(userId: string) {
+  async function bundleAndDownload(userId: string, plat: Platform = platform) {
     try {
-      // ── Download the installer exe ────────────────────────────────
+      // ── Download the installer ────────────────────────────────────
       setStage("downloading");
       setProgress(0);
 
-      const resp = await fetch(INSTALLER_URL);
+      const installerUrl = plat === "mac" ? MAC_INSTALLER_URL : WINDOWS_INSTALLER_URL;
+      const resp = await fetch(installerUrl);
       if (!resp.ok) throw new Error("Download failed — please try again.");
 
       const contentLength = Number(resp.headers.get("content-length") ?? 0);
@@ -74,7 +90,7 @@ function DownloadFlow() {
       }
 
       // Combine chunks into a single blob
-      const exeBlob = new Blob(chunks as BlobPart[]);
+      const installerBlob = new Blob(chunks as BlobPart[]);
 
       // ── Bundle into zip ───────────────────────────────────────────
       setStage("bundling");
@@ -86,7 +102,8 @@ function DownloadFlow() {
       // This is advisory only — host enforces plan server-side via get_user_plan_async().
       const plan = planParam === "pro" || planParam === "byok" ? planParam : "free";
 
-      zip.file("VoicerSetup.exe", exeBlob);
+      const installerName = plat === "mac" ? "VoicerInstaller.dmg" : "VoicerSetup.exe";
+      zip.file(installerName, installerBlob);
       zip.file("voicer-activation.txt", `${userId}\n${plan}`);
 
       setProgress(98);
@@ -97,7 +114,7 @@ function DownloadFlow() {
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "VoicerInstaller.zip";
+      a.download = plat === "mac" ? "VoicerInstaller-macOS.zip" : "VoicerInstaller.zip";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -150,23 +167,28 @@ function DownloadFlow() {
           <div className="text-center">
             <p className="font-semibold">Download started</p>
             <p className="mt-2 text-sm text-zinc-400">
-              Unzip the file and run <strong className="text-white">VoicerSetup.exe</strong>.
+              Unzip the file and run{" "}
+              <strong className="text-white">
+                {platform === "mac" ? "VoicerInstaller.dmg" : "VoicerSetup.exe"}
+              </strong>
+              .
             </p>
             <p className="mt-1 text-sm text-zinc-400">
               Keep both files in the same folder.
             </p>
           </div>
           <p className="mt-2 text-xs text-zinc-500 text-center leading-relaxed">
-            Your browser or Windows may flag the download as suspicious — this is standard for any new app.
-            Click through to install. Voicer sets up a small background service so your desktop is always
-            ready when you open the app on your phone.
+            {platform === "mac"
+              ? "macOS may say \u201ccannot be opened, unidentified developer\u201d \u2014 right-click the .dmg \u2192 Open \u2192 Open. Only needed the first time."
+              : "Windows SmartScreen may show \u201cWindows protected your PC / Suspicious Download\u201d \u2014 click More info \u2192 Run / Download anyway. The installer isn\u2019t \u201csigned\u201d yet (cert is ~$300/yr, we skipped :))."}
           </p>
-          <p className="text-xs text-zinc-600 text-center">
-            macOS installer coming soon.
+          <p className="mt-2 text-xs text-zinc-500 text-center leading-relaxed">
+            Voicer sets up a small background service so your desktop is always
+            ready when you open the app on your phone.
           </p>
           <button
             type="button"
-            onClick={() => bundleAndDownload(uid!)}
+            onClick={() => bundleAndDownload(uid!, platform)}
             className="text-sm text-zinc-500 hover:text-zinc-300"
           >
             Download didn&apos;t start? Click here
