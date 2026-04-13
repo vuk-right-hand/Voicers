@@ -34,7 +34,13 @@
       "Read(//c/Program Files/Inno Setup 6/**)",
       "Read(//c/Users/Korisnik/AppData/Local/Programs/Inno Setup 6/**)",
       "Read(//c/Users/Korisnik/**)",
-      "Bash(ls -la /c/Antigravity/Voicer/installer/bundle/python/*._pth)"
+      "Bash(ls -la /c/Antigravity/Voicer/installer/bundle/python/*._pth)",
+      "WebFetch(domain:discuss.ai.google.dev)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(curl -sk https://192.168.1.2:3000/login)",
+      "Bash(curl -s \"https://developers.cloudflare.com/calls/\")",
+      "WebSearch",
+      "Bash(host/venv/Scripts/pip.exe install:*)"
     ]
   }
 }
