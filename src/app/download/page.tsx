@@ -3,31 +3,16 @@
 import { useEffect, useState, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import JSZip from "jszip";
+import {
+  type Platform,
+  isMobileUA,
+  detectPlatform,
+  installerUrlFor,
+  installerFilenameFor,
+  zipFilenameFor,
+} from "./platform";
 
-const WINDOWS_INSTALLER_URL =
-  process.env.NEXT_PUBLIC_INSTALLER_URL ??
-  "https://pub-aa1b48d86cfc49d69effbf73a4f10cee.r2.dev/VoicerSetup.exe";
-
-const MAC_INSTALLER_URL =
-  process.env.NEXT_PUBLIC_MAC_INSTALLER_URL ??
-  "https://pub-ab293b0d3d6d4fd188ae2c2155f079d0.r2.dev/VoicerInstaller.dmg";
-
-type Platform = "windows" | "mac";
 type Stage = "validating" | "downloading" | "bundling" | "done" | "error" | "mobile";
-
-function isMobileUA(): boolean {
-  if (typeof navigator === "undefined") return false;
-  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(
-    navigator.userAgent
-  );
-}
-
-function detectPlatform(): Platform {
-  if (typeof navigator === "undefined") return "windows";
-  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
-    ? "mac"
-    : "windows";
-}
 
 function DownloadFlow() {
   const searchParams = useSearchParams();
@@ -51,11 +36,13 @@ function DownloadFlow() {
       setErrorMsg("Invalid or missing download link. Check your email for the correct URL.");
       return;
     }
-    if (isMobileUA()) {
+    const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+    const navPlat = typeof navigator !== "undefined" ? navigator.platform : "";
+    if (isMobileUA(ua)) {
       setStage("mobile");
       return;
     }
-    const p = detectPlatform();
+    const p = detectPlatform(navPlat, ua);
     setPlatform(p);
     startedRef.current = true;
     bundleAndDownload(uid, p);
@@ -68,8 +55,7 @@ function DownloadFlow() {
       setStage("downloading");
       setProgress(0);
 
-      const installerUrl = plat === "mac" ? MAC_INSTALLER_URL : WINDOWS_INSTALLER_URL;
-      const resp = await fetch(installerUrl);
+      const resp = await fetch(installerUrlFor(plat));
       if (!resp.ok) throw new Error("Download failed — please try again.");
 
       const contentLength = Number(resp.headers.get("content-length") ?? 0);
@@ -102,8 +88,7 @@ function DownloadFlow() {
       // This is advisory only — host enforces plan server-side via get_user_plan_async().
       const plan = planParam === "pro" || planParam === "byok" ? planParam : "free";
 
-      const installerName = plat === "mac" ? "VoicerInstaller.dmg" : "VoicerSetup.exe";
-      zip.file(installerName, installerBlob);
+      zip.file(installerFilenameFor(plat), installerBlob);
       zip.file("voicer-activation.txt", `${userId}\n${plan}`);
 
       setProgress(98);
@@ -114,7 +99,7 @@ function DownloadFlow() {
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = plat === "mac" ? "VoicerInstaller-macOS.zip" : "VoicerInstaller.zip";
+      a.download = zipFilenameFor(plat);
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -168,9 +153,7 @@ function DownloadFlow() {
             <p className="font-semibold">Download started</p>
             <p className="mt-2 text-sm text-zinc-400">
               Unzip the file and run{" "}
-              <strong className="text-white">
-                {platform === "mac" ? "VoicerInstaller.dmg" : "VoicerSetup.exe"}
-              </strong>
+              <strong className="text-white">{installerFilenameFor(platform)}</strong>
               .
             </p>
             <p className="mt-1 text-sm text-zinc-400">
