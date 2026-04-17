@@ -3,7 +3,7 @@
 import { create } from "zustand";
 import type { PcStatus, TransportStatus, PhoneCommand } from "@/types";
 import { initiateCall } from "@/lib/webrtc/peer";
-import { useVoiceStore, playTTSAudio } from "@/hooks/use-voice";
+import { useVoiceStore, playTTSAudio, friendlyMessageFor } from "@/hooks/use-voice";
 import { CLIPBOARD_TIMEOUT_MS } from "@/lib/constants";
 
 interface SessionState {
@@ -118,10 +118,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               // writeText() needs a user gesture on Safari so .catch() is required.
               navigator.clipboard?.writeText(msg.text).catch(() => {});
             } else if (msg.type === "voice-status") {
-              // "listening" is set locally in startListening() — ignore host echo
-              // to avoid race where _start_voice resolves after voice-stop already ran.
-              if (msg.status !== "listening") {
-                useVoiceStore.getState().setStatus(msg.status);
+              const voiceStore = useVoiceStore.getState();
+              if (msg.status === "error") {
+                voiceStore.setMicError(friendlyMessageFor(msg.reason));
+                voiceStore.setStatus("idle");
+                voiceStore.setMode(null);
+              } else if (msg.status !== "listening") {
+                // "listening" is set locally in startListening() — ignore host echo
+                // to avoid race where _start_voice resolves after voice-stop already ran.
+                voiceStore.setStatus(msg.status);
               }
             }
           } catch {

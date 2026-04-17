@@ -52,13 +52,8 @@ export default function SessionPage() {
     }
   }, [isLandscape, isKeyboardOpen]);
 
-  const keyboardTextareaRef = useRef<HTMLTextAreaElement>(null);
-
-  // Synchronous focus BEFORE state update — satisfies iOS user-gesture requirement.
-  // The textarea is always mounted (just hidden via CSS), so the ref is always valid.
-  const openKeyboard = () => {
-    keyboardTextareaRef.current?.focus({ preventScroll: true });
-    setIsKeyboardOpen(true);
+  const toggleKeyboard = () => {
+    setIsKeyboardOpen((prev) => !prev);
   };
 
   // ─── Trackpad & Scroll rects ──────────────────────────────────────────────
@@ -490,10 +485,13 @@ export default function SessionPage() {
         {!isLandscape && (
           <button
             type="button"
-            onClick={openKeyboard}
+            onClick={toggleKeyboard}
             onTouchEnd={(e) => { e.stopPropagation(); }}
-            className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-800/80 text-white backdrop-blur active:scale-90 transition-transform"
-            aria-label="Open keyboard"
+            className={`flex h-9 w-9 items-center justify-center rounded-full backdrop-blur active:scale-90 transition-colors ${
+              isKeyboardOpen ? "bg-white text-black" : "bg-zinc-800/80 text-white"
+            }`}
+            aria-label={isKeyboardOpen ? "Close keyboard" : "Open keyboard"}
+            aria-pressed={isKeyboardOpen}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="2" y="6" width="20" height="12" rx="2"/>
@@ -807,7 +805,6 @@ export default function SessionPage() {
       <KeyboardOverlay
         isOpen={isKeyboardOpen}
         isLandscape={isLandscape}
-        textareaRef={keyboardTextareaRef}
         onClose={() => setIsKeyboardOpen(false)}
         sendCommand={sendCommand}
         isConnected={transportStatus === "connected"}

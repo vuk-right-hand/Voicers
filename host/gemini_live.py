@@ -25,7 +25,12 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gemini-2.5-flash-native-audio-latest"
+# Pinned explicitly — -latest aliases rotate without notice and have broken us
+# before. `GEMINI_MODEL` is an env-var escape hatch for hot-swapping without a
+# rebuild. See tests/test_model_pinned.py for the allowlist regression guard.
+MODEL = os.environ.get(
+    "GEMINI_MODEL", "gemini-2.5-flash-preview-native-audio-dialog"
+)
 
 SYSTEM_INSTRUCTION = (
     "You are a transcription engine. Transcribe English audio only. "
@@ -134,31 +139,68 @@ class GeminiLive:
         self._resumption_handle: str | None = None  # for session resumption
         self._token_expires_at: float | None = None  # hosted-mode only
 
+        # ── Cause B: serialize activity_end / activity_start against audio sends
+        self._activity_lock = asyncio.Lock()
+
+        # ── Cause C: turn-state tracking so flush_final doesn't deadlock
+        self._turn_active = False
+        # Signals fired by _recv_loop on turn_complete or each transcription
+        # update — flush_final awaits this to early-exit.
+        self._final_signal = asyncio.Event()
+
+        # ── Diagnostics (Cause D/L)
+        self._start_ts: float = 0.0
+        self._first_audio_ts: float | None = None
+        self._first_transcription_ts: float | None = None
+        self._chunks_sent_total = 0
+        self._transcriptions_total = 0
+        self._flushes_total = 0
+        self._filter_rejections = 0
+        self._peak_qsize: int = 0
+        # Rolling 5 s RMS window over the last N chunks (~50 at 100 ms).
+        self._rms_window: list[float] = []
+
     async def start(self, _preserve_buffer: bool = False) -> None:
         """Open Gemini Live session and start send/recv/flush background tasks."""
-        use_hosted = os.environ.get("USE_HOSTED_API", "false").strip().lower() == "true"
-
-        if use_hosted:
-            # Pro tier — fetch ephemeral token from Vercel, connect via v1alpha
-            api_key, self._token_expires_at = await asyncio.to_thread(
-                _fetch_hosted_gemini_token
-            )
-            client = genai.Client(
-                api_key=api_key,
-                http_options={"api_version": "v1alpha"},
-            )
-        else:
-            # BYOK / Free — local key from .env
-            api_key = os.getenv("GEMINI_API_KEY")
-            if not api_key:
-                raise RuntimeError("GEMINI_API_KEY not set in environment")
-            client = genai.Client(api_key=api_key)
-            self._token_expires_at = None
-
-        self._api_key = api_key
+        # ── CAUSE A fix ─────────────────────────────────────────────────────
+        # Flip _active BEFORE any await so incoming PCM queues up while the
+        # token fetch + WebSocket handshake run. The queue has 200-slot / 20 s
+        # headroom; the guard `if not self._active and not self._restarting`
+        # in send_audio was silently dropping the first 3-5 s of audio.
         self._active = True
+        self._start_ts = time.monotonic()
+        self._first_audio_ts = None
+        self._first_transcription_ts = None
         if not _preserve_buffer:
             self.interim_buffer = ""
+
+        use_hosted = os.environ.get("USE_HOSTED_API", "false").strip().lower() == "true"
+        api_version = "v1alpha" if use_hosted else "v1beta"
+
+        try:
+            if use_hosted:
+                # Pro tier — fetch ephemeral token from Vercel, connect via v1alpha
+                api_key, self._token_expires_at = await asyncio.to_thread(
+                    _fetch_hosted_gemini_token
+                )
+                client = genai.Client(
+                    api_key=api_key,
+                    http_options={"api_version": "v1alpha"},
+                )
+            else:
+                # BYOK / Free — local key from .env
+                api_key = os.getenv("GEMINI_API_KEY")
+                if not api_key:
+                    raise RuntimeError("GEMINI_API_KEY not set in environment")
+                client = genai.Client(api_key=api_key)
+                self._token_expires_at = None
+        except Exception:
+            # start() failed before _session was assigned — flip _active back
+            # off so webrtc_host's error path doesn't leak an "active" GeminiLive.
+            self._active = False
+            raise
+
+        self._api_key = api_key
 
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -182,17 +224,34 @@ class GeminiLive:
             ),
         )
 
-        self._session_ctx = client.aio.live.connect(model=MODEL, config=config)
-        self._session = await self._session_ctx.__aenter__()
+        try:
+            self._session_ctx = client.aio.live.connect(model=MODEL, config=config)
+            self._session = await self._session_ctx.__aenter__()
 
-        # With VAD disabled, we MUST send activityStart to tell the server
-        # we're speaking.
-        await self._session.send_realtime_input(
-            activity_start=types.ActivityStart()
-        )
-        self._last_activity_start = time.monotonic()
+            # With VAD disabled, we MUST send activityStart to tell the server
+            # we're speaking.
+            await self._session.send_realtime_input(
+                activity_start=types.ActivityStart()
+            )
+            self._last_activity_start = time.monotonic()
+            self._turn_active = True
+            self._final_signal.clear()
+        except Exception:
+            self._active = False
+            if self._session_ctx is not None:
+                try:
+                    await self._session_ctx.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                self._session_ctx = None
+                self._session = None
+            raise
 
         loop = asyncio.get_running_loop()
+        # INVARIANT: _send_task must NOT be spawned before self._session is
+        # assigned — _send_loop would pull chunks from the queue while
+        # self._session is None and the inner "if self._session is None:
+        # continue" guard would silently drop them.
         self._send_task = loop.create_task(self._send_loop(), name="gemini-send")
         self._recv_task = loop.create_task(self._recv_loop(), name="gemini-recv")
         self._flush_task = loop.create_task(self._flush_loop(), name="gemini-flush")
@@ -202,14 +261,23 @@ class GeminiLive:
             )
 
         resumption_status = "resuming" if self._resumption_handle else "new"
-        logger.info("Gemini Live session started (model=%s, VAD=off, flush=%ds, %s)",
-                     MODEL, _FLUSH_INTERVAL_S, resumption_status)
+        token_expiry_str = (
+            f"{self._token_expires_at - time.monotonic():.0f}s"
+            if self._token_expires_at else "n/a"
+        )
+        logger.info(
+            "Gemini Live session started (model=%s api_version=%s mode=%s "
+            "VAD=off flush=%ds %s token_expires_in=%s)",
+            MODEL, api_version, "hosted" if use_hosted else "byok",
+            _FLUSH_INTERVAL_S, resumption_status, token_expiry_str,
+        )
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         """Queue raw 16kHz Int16 PCM chunk for streaming to Gemini."""
         if not self._active and not self._restarting:
             return
         try:
+            self._peak_qsize = max(self._peak_qsize, self._audio_queue.qsize() + 1)
             self._audio_queue.put_nowait(pcm_bytes)
         except asyncio.QueueFull:
             if not self._restarting:
@@ -244,7 +312,13 @@ class GeminiLive:
             self._session_ctx = None
             self._session = None
 
-        logger.info("Gemini Live session stopped")
+        duration = time.monotonic() - self._start_ts if self._start_ts else 0.0
+        logger.info(
+            "Gemini Live session stopped — chunks=%d transcriptions=%d "
+            "duration=%.1fs flushes=%d filter_rejections=%d peak_qsize=%d",
+            self._chunks_sent_total, self._transcriptions_total, duration,
+            self._flushes_total, self._filter_rejections, self._peak_qsize,
+        )
 
     async def restart(self) -> None:
         """Tear down and reopen, preserving interim_buffer and resumption handle."""
@@ -283,7 +357,12 @@ class GeminiLive:
     # ── Internal tasks ────────────────────────────────────────────────────────
 
     async def _send_loop(self) -> None:
-        """Drain audio queue and stream chunks to Gemini."""
+        """Drain audio queue and stream chunks to Gemini.
+
+        Acquires _activity_lock around each realtime-input send so that
+        _flush_loop's activity_end/activity_start pair can atomically bracket
+        the send stream without losing audio inside a gap (Cause B).
+        """
         chunks_sent = 0
         try:
             while self._active:
@@ -293,19 +372,74 @@ class GeminiLive:
                 if self._session is None:
                     continue
                 try:
-                    await self._session.send_realtime_input(
-                        audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
-                    )
+                    async with self._activity_lock:
+                        await self._session.send_realtime_input(
+                            audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                        )
                     chunks_sent += 1
+                    self._chunks_sent_total = chunks_sent
+
                     if chunks_sent == 1:
-                        logger.info("First audio chunk sent to Gemini (%d bytes)", len(chunk))
+                        self._first_audio_ts = time.monotonic()
+                        ttfa_ms = int((self._first_audio_ts - self._start_ts) * 1000)
+                        logger.info(
+                            "First audio chunk sent to Gemini (%d bytes, time-to-first-audio=%dms)",
+                            len(chunk), ttfa_ms,
+                        )
                     elif chunks_sent % 100 == 0:
                         logger.debug("Sent %d audio chunks to Gemini", chunks_sent)
+
+                    # Rolling 5 s RMS window (~50 chunks at 100 ms). Warn every
+                    # 50 chunks if the window-wide average stays below the
+                    # silence floor — catches zero-amplitude mic (Cause L).
+                    try:
+                        rms = self._rms_of_pcm16le(chunk)
+                    except Exception:
+                        rms = 0.0
+                    self._rms_window.append(rms)
+                    if len(self._rms_window) > 50:
+                        self._rms_window.pop(0)
+                    if chunks_sent % 50 == 0 and len(self._rms_window) >= 50:
+                        avg = sum(self._rms_window) / len(self._rms_window)
+                        if avg < 0.0002:
+                            logger.warning(
+                                "Low mic RMS (rolling 5s avg=%.6f) — mic may be "
+                                "producing pure silence despite noiseSuppression",
+                                avg,
+                            )
                 except Exception as exc:
                     logger.warning("Gemini send error: %s", exc)
         except asyncio.CancelledError:
             pass
-        logger.info("Send loop ended — %d chunks sent total", chunks_sent)
+        logger.info(
+            "Send loop ended — %d chunks sent total, peak_qsize=%d",
+            chunks_sent, self._peak_qsize,
+        )
+
+    @staticmethod
+    def _rms_of_pcm16le(pcm_bytes: bytes) -> float:
+        """Root-mean-square of a 16-bit little-endian PCM buffer, normalized
+        to [0,1]. Pure-Python — no numpy import cost per chunk."""
+        if not pcm_bytes:
+            return 0.0
+        # 16-bit little-endian signed
+        n = len(pcm_bytes) // 2
+        if n == 0:
+            return 0.0
+        total = 0.0
+        # Sample every 4th sample to keep cost bounded at 32 multiplies per
+        # 100-ms chunk. Aliasing is not a concern for an amplitude average.
+        step = 4
+        import struct
+        count = 0
+        for i in range(0, n, step):
+            off = i * 2
+            (s,) = struct.unpack_from("<h", pcm_bytes, off)
+            total += (s / 32768.0) ** 2
+            count += 1
+        if count == 0:
+            return 0.0
+        return (total / count) ** 0.5
 
     async def _token_expiry_loop(self) -> None:
         """Hosted-mode only: trigger restart() ~60s before the ephemeral token's
@@ -340,6 +474,14 @@ class GeminiLive:
     async def _flush_loop(self) -> None:
         """Periodically cycle activityEnd→activityStart to reset the
         transcription pipeline before it degrades.
+
+        Takes _activity_lock so the end/start pair brackets against _send_loop
+        atomically — audio sent outside [activity_start, activity_end) is
+        discarded server-side in VAD-off mode (Cause B).
+
+        The old `break`-on-first-error turned one transient WS blip into a
+        permanent flush-off, and transcription degraded 20-40 s later with no
+        recovery (Cause I). We now `continue` and retry next cycle.
         """
         flush_count = 0
         try:
@@ -348,24 +490,92 @@ class GeminiLive:
                 if not self._active or self._session is None:
                     break
                 try:
-                    await self._session.send_realtime_input(
-                        activity_end=types.ActivityEnd()
-                    )
-                    # Brief pause to let server process the end before new start
-                    await asyncio.sleep(0.05)
-                    await self._session.send_realtime_input(
-                        activity_start=types.ActivityStart()
-                    )
+                    async with self._activity_lock:
+                        await self._session.send_realtime_input(
+                            activity_end=types.ActivityEnd()
+                        )
+                        self._turn_active = False
+                        await self._session.send_realtime_input(
+                            activity_start=types.ActivityStart()
+                        )
+                        self._turn_active = True
                     self._last_activity_start = time.monotonic()
                     flush_count += 1
+                    self._flushes_total = flush_count
                     logger.info("Pipeline flush #%d complete (activityEnd→activityStart)", flush_count)
                 except Exception as exc:
-                    logger.warning("Pipeline flush #%d failed: %s — session may be dead",
-                                   flush_count + 1, exc)
-                    break
+                    logger.warning(
+                        "Pipeline flush #%d failed: %s — retrying next cycle",
+                        flush_count + 1, exc,
+                    )
+                    # Keep the loop alive — don't let one WS blip freeze flushing
+                    # forever. If the session is genuinely dead, _recv_loop will
+                    # exit and trigger _on_session_dead → restart().
         except asyncio.CancelledError:
             pass
         logger.info("Flush loop ended after %d flushes", flush_count)
+
+    async def flush_final(self, timeout: float = 1.5) -> str:
+        """Send activity_end and wait briefly for any trailing transcription.
+
+        Called by webrtc_host._stop_voice — the last 200–500 ms of audio is
+        typically still in flight when the user taps Stop; its transcription
+        arrives after activity_end. Without this wait, those final words are
+        dropped on the floor (Cause C).
+
+        Algorithm (deadlock-proof):
+          1. Drain the audio queue into the session.
+          2. If _turn_active is False — a prior flush already closed the turn
+             and we already got turn_complete — return immediately. This is
+             the common case when the user pauses between phrases, and the
+             guard prevents paying a 1.5 s penalty on every Stop tap.
+          3. Otherwise send activity_end and await _final_signal with timeout.
+             _recv_loop sets the signal on the next turn_complete OR on any
+             input_transcription that arrives after activity_end.
+          4. Return self.interim_buffer.
+        """
+        # Drain buffered audio so it reaches the session before activity_end.
+        # Bounded loop — we only pull what's already queued, no blocking get().
+        if self._session is not None:
+            while not self._audio_queue.empty():
+                try:
+                    chunk = self._audio_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if chunk is None:
+                    break
+                try:
+                    async with self._activity_lock:
+                        await self._session.send_realtime_input(
+                            audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                        )
+                except Exception as exc:
+                    logger.debug("flush_final drain send error: %s", exc)
+                    break
+
+        if not self._turn_active:
+            # Turn already closed — no deadlock, no 1.5 s penalty.
+            return self.interim_buffer.strip()
+
+        if self._session is None:
+            return self.interim_buffer.strip()
+
+        self._final_signal.clear()
+        try:
+            async with self._activity_lock:
+                await self._session.send_realtime_input(
+                    activity_end=types.ActivityEnd()
+                )
+                self._turn_active = False
+        except Exception as exc:
+            logger.warning("flush_final activity_end failed: %s", exc)
+            return self.interim_buffer.strip()
+
+        try:
+            await asyncio.wait_for(self._final_signal.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.info("flush_final: timeout reached at %.2fs — returning buffer as-is", timeout)
+        return self.interim_buffer.strip()
 
     async def _recv_loop(self) -> None:
         """Receive ASR transcriptions and handle session lifecycle events.
@@ -416,7 +626,23 @@ class GeminiLive:
                         logger.info("  input_transcription: %r", raw[:100])
                         if raw.strip() and _HAS_LATIN_OR_DIGIT.search(raw):
                             self.interim_buffer = (self.interim_buffer + raw).strip()
+                            self._transcriptions_total += 1
+                            if self._first_transcription_ts is None:
+                                self._first_transcription_ts = time.monotonic()
+                                logger.info(
+                                    "First transcription received (time-to-first-transcription=%dms)",
+                                    int((self._first_transcription_ts - self._start_ts) * 1000),
+                                )
                             self._on_transcript(self.interim_buffer, False)
+                            # Wake any flush_final() waiting on trailing text.
+                            self._final_signal.set()
+                        elif raw.strip():
+                            # Non-Latin hallucination (CJK, Arabic) — Cause J.
+                            self._filter_rejections += 1
+                            logger.warning(
+                                "Non-Latin transcription filtered (rejection #%d): %r",
+                                self._filter_rejections, raw[:80],
+                            )
 
                     if has_model_turn:
                         logger.debug("  model_turn (ignored)")
@@ -424,6 +650,9 @@ class GeminiLive:
                     if has_turn:
                         turns += 1
                         logger.debug("  turn_complete #%d (expected from flush cycle)", turns)
+                        self._turn_active = False
+                        # Wake any flush_final() waiting for the turn to close.
+                        self._final_signal.set()
 
                 # Iterator exhausted — expected after each flush cycle.
                 if not self._active:

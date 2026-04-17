@@ -37,8 +37,9 @@ export type PhoneCommand =
   | { type: "type"; text: string }
   | { type: "command"; action: string; payload: Record<string, unknown> }
   | { type: "voice-start"; mode: "dictation" | "command" }
-  | { type: "voice-stop" }
+  | { type: "voice-stop"; reason?: string }
   | { type: "type-text"; text: string }
+  | { type: "mic-info"; sampleRate: number; channelCount: number; userAgent: string }
   | { type: "mousemove"; dx: number; dy: number }
   | { type: "mousedown" }
   | { type: "mouseup" }
@@ -55,7 +56,12 @@ export type HostMessage =
   | { type: "screen-info"; width: number; height: number }
   | { type: "error"; message: string }
   | { type: "stt"; text: string; is_final: boolean }
-  | { type: "voice-status"; status: "listening" | "processing" | "speaking" | "idle" }
+  | {
+      type: "voice-status";
+      status: "listening" | "processing" | "speaking" | "idle" | "error";
+      reason?: string;
+      detail?: string;
+    }
   | { type: "clipboard"; text: string }
   | { type: "clipboard-push"; text: string };
 // Note: binary ArrayBuffer (raw MP3 TTS) is also sent but not typed here

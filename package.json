@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --test \"src/**/*.test.mjs\"",
     "host": "cd host && venv/Scripts/uvicorn server:app --host 0.0.0.0 --port 8000 --reload"
   },
   "dependencies": {

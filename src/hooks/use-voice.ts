@@ -3,10 +3,15 @@
 import { useCallback, useEffect, useRef } from "react";
 import { create } from "zustand";
 import { VOICE_CHUNK_INTERVAL_MS } from "@/lib/constants";
+import { WORKLET_CODE, friendlyMessageFor } from "@/hooks/voice-worklet";
+
+// Re-exports so the existing use-session.ts import
+// (`import { friendlyMessageFor } from "@/hooks/use-voice"`) keeps working.
+export { WORKLET_CODE, friendlyMessageFor };
 
 // ─── Voice State ────────────────────────────────────────────────────────────
 
-export type VoiceStatus = "idle" | "listening" | "processing" | "speaking";
+export type VoiceStatus = "idle" | "listening" | "processing" | "speaking" | "error";
 export type VoiceMode = "dictation" | "command";
 
 interface VoiceState {
@@ -58,53 +63,6 @@ export const useVoiceStore = create<VoiceState>((set) => ({
       micError: null,
     }),
 }));
-
-// ─── Inline AudioWorklet processor (avoids Next.js compilation issues) ──────
-
-const WORKLET_CODE = `
-class PCMProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._buffer = [];
-    this._bufferSize = 0;
-    // ~100ms of 16kHz audio = 1600 samples
-    this._targetSize = 1600;
-  }
-
-  process(inputs) {
-    const input = inputs[0];
-    if (!input || !input[0]) return true;
-
-    const samples = input[0];
-    this._buffer.push(new Float32Array(samples));
-    this._bufferSize += samples.length;
-
-    if (this._bufferSize >= this._targetSize) {
-      // Merge all buffered chunks
-      const merged = new Float32Array(this._bufferSize);
-      let offset = 0;
-      for (const chunk of this._buffer) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      this._buffer = [];
-      this._bufferSize = 0;
-
-      // Float32 → Int16
-      const int16 = new Int16Array(merged.length);
-      for (let i = 0; i < merged.length; i++) {
-        const s = Math.max(-1, Math.min(1, merged[i]));
-        int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-
-      this.port.postMessage(int16.buffer, [int16.buffer]);
-    }
-    return true;
-  }
-}
-
-registerProcessor("pcm-processor", PCMProcessor);
-`;
 
 // ─── Audio Context singleton (unlocked on first interaction) ────────────────
 
@@ -182,6 +140,38 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainRef = useRef<GainNode | null>(null);
+  const mutedRef = useRef(false);
+  const inputSampleRateRef = useRef<number>(16000);
+
+  // iOS 17.4+ may GC the worklet while muted even with the gain(0) workaround.
+  // On unmute we tear down source/worklet but keep audioCtx + gain + stream,
+  // then rebuild the graph. Safe to call any time status=="listening".
+  const rebuildWorkletGraph = useCallback(() => {
+    const audioCtx = audioCtxRef.current;
+    const stream = streamRef.current;
+    const gain = gainRef.current;
+    if (!audioCtx || !stream || !gain) return;
+    if (useVoiceStore.getState().status !== "listening") return;
+
+    try { workletRef.current?.disconnect(); } catch { /* ignore */ }
+    try { sourceRef.current?.disconnect(); } catch { /* ignore */ }
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    sourceRef.current = source;
+
+    const worklet = new AudioWorkletNode(audioCtx, "pcm-processor", {
+      processorOptions: { inputSampleRate: inputSampleRateRef.current },
+    });
+    workletRef.current = worklet;
+    worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+      if (mutedRef.current) return;
+      if (dataChannel && dataChannel.readyState === "open") {
+        dataChannel.send(e.data);
+      }
+    };
+    source.connect(worklet);
+    worklet.connect(gain);
+  }, [dataChannel]);
 
   const startListening = useCallback(
     async (mode: VoiceMode) => {
@@ -196,6 +186,8 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
       store.setStatus("listening");
       store.setMode(mode);
       store.clearTranscript();
+      store.setMicError(null);
+      mutedRef.current = false;
 
       // Tell host we're starting
       dataChannel.send(JSON.stringify({ type: "voice-start", mode }));
@@ -217,6 +209,18 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         const audioCtx = new AudioContext({ sampleRate: 16000 });
         audioCtxRef.current = audioCtx;
 
+        // Android Chrome / Pixel often ignores the 16 kHz request and runs the
+        // context at the device native rate (48 kHz). Read the actual rate and
+        // route through the worklet's decimation path if needed.
+        const inputSampleRate = audioCtx.sampleRate;
+        inputSampleRateRef.current = inputSampleRate;
+        const needsDecimate = inputSampleRate !== 16000;
+        console.info(
+          "[voice] AudioContext rate=%d, decimating: %s",
+          inputSampleRate,
+          needsDecimate,
+        );
+
         // Get mic stream (async — would lose gesture token if AudioContext created after)
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -228,19 +232,42 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         });
         streamRef.current = stream;
 
+        // Tell host what rate we're actually running at — correlates client
+        // reality with server logs when debugging "no audio" reports.
+        try {
+          dataChannel.send(JSON.stringify({
+            type: "mic-info",
+            sampleRate: inputSampleRate,
+            channelCount: 1,
+            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "unknown",
+          }));
+        } catch {
+          // Channel may have closed between status check and send — host can
+          // still operate, just without the diagnostic.
+        }
+
         // Monitor audio track lifecycle — detect mic death from OS/browser
         const audioTrack = stream.getAudioTracks()[0];
         if (audioTrack) {
           audioTrack.onended = () => {
             console.warn("[voice] Audio track ended — mic was revoked or taken by another app");
+            if (dataChannel.readyState === "open") {
+              try { dataChannel.send(JSON.stringify({ type: "voice-stop", reason: "track-ended" })); }
+              catch { /* ignore */ }
+            }
             stopListening("track-ended");
             useVoiceStore.getState().setMicError("Mic disconnected");
           };
           audioTrack.onmute = () => {
             console.warn("[voice] Audio track muted by OS/browser");
+            mutedRef.current = true;
+            useVoiceStore.getState().setMicError("Mic paused by OS");
           };
           audioTrack.onunmute = () => {
             console.info("[voice] Audio track unmuted");
+            mutedRef.current = false;
+            useVoiceStore.getState().setMicError(null);
+            rebuildWorkletGraph();
           };
         }
 
@@ -272,11 +299,14 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         const source = audioCtx.createMediaStreamSource(stream);
         sourceRef.current = source;
 
-        const worklet = new AudioWorkletNode(audioCtx, "pcm-processor");
+        const worklet = new AudioWorkletNode(audioCtx, "pcm-processor", {
+          processorOptions: { inputSampleRate },
+        });
         workletRef.current = worklet;
 
         // Send PCM chunks to host as binary
         worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+          if (mutedRef.current) return;  // OS paused the mic — don't ship zeros
           if (dataChannel.readyState === "open") {
             dataChannel.send(e.data);
           }

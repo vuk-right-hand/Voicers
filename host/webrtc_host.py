@@ -206,6 +206,12 @@ class WebRTCHost:
         self._voice_active = False
         self._voice_mode: str | None = None  # "dictation" | "command"
         self._gemini_restarting = False
+        self._voice_starting_task: asyncio.Task | None = None
+        self._no_audio_watchdog: asyncio.Task | None = None
+        self._mid_session_watchdog: asyncio.Task | None = None
+        self._last_audio_chunk_ts: float = 0.0
+        self._mic_info: dict | None = None
+        self._pending_status_flushes: list[dict] = []
 
         # Clipboard watcher (pushes PC clipboard changes to phone)
         self._clipboard_watcher = ClipboardWatcher(callback=self._on_clipboard_change)
@@ -398,6 +404,13 @@ class WebRTCHost:
             # Binary message = raw PCM audio from phone mic
             if isinstance(message, bytes):
                 if self._voice_active and self._gemini:
+                    # First chunk arrived — cancel the no-audio watchdog. This
+                    # beats the race where the chunk lands at t=2.95 s and the
+                    # watchdog is about to fire at t=3.0 s.
+                    if self._no_audio_watchdog is not None:
+                        self._no_audio_watchdog.cancel()
+                        self._no_audio_watchdog = None
+                    self._last_audio_chunk_ts = time.monotonic()
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._gemini.send_audio(message))
                 return
@@ -438,13 +451,32 @@ class WebRTCHost:
             elif cmd_type == "voice-start":
                 self._voice_mode = data.get("mode", "dictation")
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._start_voice(channel))
+                # Hold a handle so _stop_voice can cancel an in-flight start
+                # if the user double-taps during the 1s Gemini connect window.
+                self._voice_starting_task = loop.create_task(self._start_voice(channel))
 
             elif cmd_type == "voice-stop":
                 reason = data.get("reason", "no-reason")
                 logger.info(">>> Received voice-stop from PWA — reason: %s", reason)
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._stop_voice(channel))
+
+            elif cmd_type == "mic-info":
+                # Phone reports actual mic AudioContext rate, channel count, UA.
+                # Stash for inclusion in diagnostic logs on next "no-audio" or
+                # low-RMS warning — the single most useful field when debugging
+                # a user's "no audio" report.
+                self._mic_info = {
+                    "sampleRate": data.get("sampleRate"),
+                    "channelCount": data.get("channelCount"),
+                    "userAgent": (data.get("userAgent") or "")[:200],
+                }
+                logger.info(
+                    "mic-info received: sampleRate=%s channelCount=%s UA=%s",
+                    self._mic_info["sampleRate"],
+                    self._mic_info["channelCount"],
+                    self._mic_info["userAgent"],
+                )
 
             # ── Trackpad mode commands ──────────────────────────────
 
@@ -495,6 +527,16 @@ class WebRTCHost:
                 "width": w,
                 "height": h,
             }))
+            # Drain any status payloads that were queued while the channel
+            # was still opening (e.g. _start_voice threw before on_open ran).
+            if self._pending_status_flushes:
+                pending = self._pending_status_flushes
+                self._pending_status_flushes = []
+                for payload in pending:
+                    try:
+                        channel.send(json.dumps(payload))
+                    except Exception:
+                        logger.exception("Failed to drain pending status flush: %s", payload)
             # Start broadcasting cursor position to phone (~20 Hz)
             loop = asyncio.get_running_loop()
             loop.create_task(self._cursor_broadcast_loop(channel))
@@ -518,9 +560,108 @@ class WebRTCHost:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._stop_voice(channel=None))
 
+    def _send_status(self, channel, payload: dict) -> None:
+        """Send a voice-status / diagnostic payload, queueing if the channel
+        isn't ready.
+
+        - channel is None (e.g. _stop_voice fired from on_close):
+          drop silently — there is no future on_open to drain to.
+        - channel.readyState == "open": send directly.
+        - otherwise: append to _pending_status_flushes, drained by on_open.
+        """
+        if channel is None:
+            return
+        try:
+            if channel.readyState == "open":
+                channel.send(json.dumps(payload))
+            else:
+                self._pending_status_flushes.append(payload)
+        except Exception:
+            logger.exception("Failed to send status payload: %s", payload)
+
+    @staticmethod
+    def _classify_start_error(exc: BaseException) -> str:
+        """Map a _start_voice exception onto the fixed taxonomy. Keep in sync
+        with friendlyMessageFor() in src/hooks/use-voice.ts. Tested in
+        host/tests/test_start_voice_error_surfaces.py.
+
+        | reason      | Raised from                                       |
+        | ----------- | ------------------------------------------------- |
+        | token       | _fetch_hosted_gemini_token (HTTP 4xx/5xx, network)|
+        | model       | live.connect() w/ "model"/"not found"/"404"       |
+        | handshake   | other live.connect() failure                      |
+        | unknown     | catch-all                                          |
+        """
+        msg = (str(exc) or exc.__class__.__name__).lower()
+        # Token errors come from _fetch_hosted_gemini_token as RuntimeError with
+        # messages containing "Pro token" / "401" / "network error" / "USER_ID".
+        if isinstance(exc, RuntimeError) and any(
+            k in msg for k in ("pro token", "401", "403", "network", "user_id", "supabase_service", "gemini_api_key")
+        ):
+            return "token"
+        if any(k in msg for k in ("model", "not found", "404")):
+            return "model"
+        # Common handshake indicators.
+        if any(k in msg for k in ("websocket", "handshake", "connection", "connect")):
+            return "handshake"
+        return "unknown"
+
+    async def _no_audio_check(self, channel) -> None:
+        """3 s after voice-start, if no audio chunk has arrived, the phone's
+        mic is dead or permissions were denied. Emit a structured error so the
+        PWA can show a toast."""
+        try:
+            await asyncio.sleep(3.0)
+            if not self._voice_active:
+                return
+            # Race window: first chunk may have arrived between sleep expiring
+            # and this line running. Guard with last-chunk-ts too.
+            if self._last_audio_chunk_ts > 0:
+                return
+            logger.warning(
+                "No-audio watchdog fired — no PCM in 3s (mic_info=%s)", self._mic_info
+            )
+            self._send_status(channel, {
+                "type": "voice-status",
+                "status": "error",
+                "reason": "no-audio",
+                "detail": "No audio chunks received in 3 seconds",
+            })
+        except asyncio.CancelledError:
+            pass
+
+    async def _mid_session_audio_watchdog(self, channel) -> None:
+        """If the PWA's voice-stop is dropped (data channel blip or Android
+        PWA swiped away mid-session), chunks just stop arriving. Without this,
+        _voice_active stays True forever and the session leaks. Every 2 s we
+        check whether the last chunk was >10 s ago; if so, call _stop_voice.
+        """
+        try:
+            while self._voice_active:
+                await asyncio.sleep(2.0)
+                if not self._voice_active:
+                    return
+                now = time.monotonic()
+                if self._last_audio_chunk_ts == 0:
+                    continue  # never seen a chunk yet — no-audio watchdog owns this
+                if now - self._last_audio_chunk_ts > 10.0:
+                    logger.warning(
+                        "Mid-session watchdog: no audio in >10s, auto-stopping voice session"
+                    )
+                    await self._stop_voice(channel)
+                    return
+        except asyncio.CancelledError:
+            pass
+
     async def _start_voice(self, channel):
-        """Start a Gemini Live STT session."""
+        """Start a Gemini Live STT session.
+
+        Wraps Gemini.start() in try/except and classifies the exception onto a
+        fixed taxonomy ("token" / "model" / "handshake" / "unknown"). PWA maps
+        these to friendly copy via friendlyMessageFor(). See _classify_start_error.
+        """
         self._voice_active = True
+        self._last_audio_chunk_ts = 0.0
 
         def on_transcript(text: str, is_final: bool):
             """Forward transcription to phone over data channel."""
@@ -537,13 +678,54 @@ class WebRTCHost:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._restart_gemini(channel))
 
-        self._gemini = GeminiLive(on_transcript=on_transcript, on_session_dead=on_session_dead)
-        await self._gemini.start()
+        try:
+            self._gemini = GeminiLive(on_transcript=on_transcript, on_session_dead=on_session_dead)
+            await self._gemini.start()
+        except asyncio.CancelledError:
+            # _stop_voice cancelled us mid-connect (user double-tapped). Clean
+            # up any partial state and swallow — stop already ran.
+            logger.info("_start_voice cancelled — double-tap race")
+            if self._gemini is not None:
+                try:
+                    await self._gemini.stop()
+                except Exception:
+                    pass
+                self._gemini = None
+            self._voice_active = False
+            self._voice_mode = None
+            raise
+        except Exception as exc:
+            reason = self._classify_start_error(exc)
+            logger.exception(
+                "Gemini Live start failed — reason=%s mic_info=%s",
+                reason, self._mic_info,
+            )
+            self._send_status(channel, {
+                "type": "voice-status",
+                "status": "error",
+                "reason": reason,
+                "detail": f"{type(exc).__name__}: {exc}",
+            })
+            self._voice_active = False
+            self._voice_mode = None
+            self._gemini = None
+            return
+        finally:
+            self._voice_starting_task = None
 
         if channel.readyState == "open":
             channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
-        logger.info("Voice session started (mode=%s)", self._voice_mode)
+        # Arm the 3 s no-audio watchdog. Cancelled on first binary chunk.
+        loop = asyncio.get_running_loop()
+        self._no_audio_watchdog = loop.create_task(self._no_audio_check(channel))
+        # Arm the mid-session watchdog so we recover if voice-stop is dropped.
+        self._mid_session_watchdog = loop.create_task(self._mid_session_audio_watchdog(channel))
+
+        logger.info(
+            "Voice session started (mode=%s mic_info=%s)",
+            self._voice_mode, self._mic_info,
+        )
 
     async def _restart_gemini(self, channel):
         """Restart the Gemini session after a drop, preserving accumulated transcript."""
@@ -571,20 +753,42 @@ class WebRTCHost:
         self._voice_active = False
         self._voice_mode = None
 
+        # Cancel any in-flight start (user double-tapped during 1 s Gemini connect).
+        if self._voice_starting_task is not None and not self._voice_starting_task.done():
+            self._voice_starting_task.cancel()
+            try:
+                await self._voice_starting_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._voice_starting_task = None
+
+        # Cancel watchdogs before tearing down Gemini so they can't fire mid-stop.
+        for task_attr in ("_no_audio_watchdog", "_mid_session_watchdog"):
+            task = getattr(self, task_attr)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, task_attr, None)
+
         if self._gemini:
-            # Flush accumulated ASR buffer as is_final=True — no waiting needed
-            final_text = self._gemini.interim_buffer.strip()
+            # Wait for any final transcription still in flight (Cause C).
+            try:
+                final_text = await self._gemini.flush_final()
+            except Exception:
+                logger.exception("flush_final failed — falling back to interim_buffer")
+                final_text = self._gemini.interim_buffer.strip()
             if final_text and channel and channel.readyState == "open":
-                channel.send(json.dumps({
-                    "type": "stt",
-                    "text": final_text,
-                    "is_final": True,
-                }))
+                try:
+                    channel.send(json.dumps({
+                        "type": "stt",
+                        "text": final_text,
+                        "is_final": True,
+                    }))
+                except Exception:
+                    logger.exception("Failed to send final stt")
             await self._gemini.stop()
             self._gemini = None
 
-        if channel and channel.readyState == "open":
-            channel.send(json.dumps({"type": "voice-status", "status": "idle"}))
+        self._send_status(channel, {"type": "voice-status", "status": "idle"})
 
         logger.info("Voice session stopped")
 
