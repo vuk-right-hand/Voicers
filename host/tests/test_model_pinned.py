@@ -29,9 +29,11 @@ import gemini_live
 # the reason (e.g. "Google stable preview alias as of 2026-04, verified with
 # real-API smoke in both v1alpha and v1beta").
 ALLOWED_MODELS = frozenset({
-    # 2026-04: stable preview alias used in Google's own native-audio samples.
-    # Verified via test_gemini_real_integration.py in BYOK + hosted modes.
-    "gemini-2.5-flash-preview-native-audio-dialog",
+    # 2026-04-17: `gemini-2.5-flash-preview-native-audio-dialog` was retired
+    # server-side when Google consolidated v1alpha into v1main. Replacement is
+    # the date-stamped 2.5-flash native-audio preview. Verified live against
+    # the hosted path after the consolidation broke existing pins.
+    "gemini-2.5-flash-native-audio-preview-12-2025",
 })
 
 
@@ -78,12 +80,12 @@ def test_env_override_still_respected(monkeypatch):
 
     monkeypatch.setenv("GEMINI_MODEL", "gemini-override-for-test")
     resolved = os.environ.get(
-        "GEMINI_MODEL", "gemini-2.5-flash-preview-native-audio-dialog"
+        "GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"
     )
     assert resolved == "gemini-override-for-test"
 
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     resolved = os.environ.get(
-        "GEMINI_MODEL", "gemini-2.5-flash-preview-native-audio-dialog"
+        "GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"
     )
-    assert resolved == "gemini-2.5-flash-preview-native-audio-dialog"
+    assert resolved == "gemini-2.5-flash-native-audio-preview-12-2025"

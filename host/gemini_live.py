@@ -20,8 +20,13 @@ import time
 from typing import Callable
 
 import httpx
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+
+# Must run before MODEL is read so GEMINI_MODEL in .env overrides the default
+# even when this module is imported before supabase_client (which also loads).
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +34,7 @@ logger = logging.getLogger(__name__)
 # before. `GEMINI_MODEL` is an env-var escape hatch for hot-swapping without a
 # rebuild. See tests/test_model_pinned.py for the allowlist regression guard.
 MODEL = os.environ.get(
-    "GEMINI_MODEL", "gemini-2.5-flash-preview-native-audio-dialog"
+    "GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"
 )
 
 SYSTEM_INSTRUCTION = (
