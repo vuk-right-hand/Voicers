@@ -48,6 +48,11 @@ def _make_host() -> webrtc_host.WebRTCHost:
     host._last_audio_chunk_ts = 0.0
     host._mic_info = None
     host._pending_status_flushes = []
+    host._gemini_ready = None
+    host._gemini_prewarm_task = None
+    host._voice_start_ts = None
+    host._voice_start_logged = False
+    host.data_channel = None
     return host
 
 
@@ -88,12 +93,20 @@ async def test_double_tap_during_connect_leaves_no_zombie(
     await asyncio.sleep(0.05)
 
     # Post-stop invariants.
+    # Session-lifecycle promotion (2026-04-17): _stop_voice no longer tears
+    # down _gemini. The session survives until _teardown_gemini fires at DC
+    # close / bye / connection-state=failed. The "zombie" this test protects
+    # against is voice-active state stuck True, not the Gemini object itself.
     assert host._voice_active is False, "_voice_active left True — zombie session"
     assert host._voice_mode is None
-    assert host._gemini is None, "_gemini not disposed — zombie reference"
     assert host._voice_starting_task is None, "_voice_starting_task not cleared"
     assert host._no_audio_watchdog is None
     assert host._mid_session_watchdog is None
+
+    # Cleanup: the session created by pre-warm is our responsibility to stop
+    # (tests don't run a DC-close lifecycle).
+    await host._teardown_gemini()
+    assert host._gemini is None, "_teardown_gemini failed to dispose session"
 
     # PWA got an explicit idle (not left in listening limbo).
     statuses = [json.loads(s) for s in channel.sends]

@@ -27,7 +27,6 @@ Run: cd host && venv/Scripts/python.exe -m pytest tests/test_start_voice_error_s
 """
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
@@ -65,6 +64,11 @@ def _make_host() -> webrtc_host.WebRTCHost:
     host._last_audio_chunk_ts = 0.0
     host._mic_info = None
     host._pending_status_flushes = []
+    host._gemini_ready = None
+    host._gemini_prewarm_task = None
+    host._voice_start_ts = None
+    host._voice_start_logged = False
+    host.data_channel = None
     return host
 
 
@@ -98,6 +102,12 @@ async def test_start_voice_surfaces_each_error_reason(
 
     host = _make_host()
     channel = FakeChannel(readyState="open")
+    # Session-lifecycle promotion (2026-04-17): _prewarm_gemini's callbacks
+    # bind against self.data_channel (the instance attribute), not the
+    # parameter passed to _start_voice — the channel doesn't exist yet at
+    # offer-time. Production always has data_channel set by the time
+    # _start_voice runs, so mirror that here.
+    host.data_channel = channel
 
     # Install a GeminiLive.start that raises the parameterized exception.
     async def raising_start(self, _preserve_buffer: bool = False):
@@ -127,9 +137,7 @@ async def test_start_voice_surfaces_each_error_reason(
 
 
 @pytest.mark.asyncio
-async def test_start_voice_error_queues_when_channel_not_open(
-    fake_client_factory, monkeypatch
-):
+async def test_start_voice_error_queues_when_channel_not_open(monkeypatch):
     """Audit catch — the closed-channel race.
 
     If the data channel is still in 'connecting' state when _start_voice
@@ -175,14 +183,19 @@ async def test_start_voice_error_queues_when_channel_not_open(
 
 
 @pytest.mark.asyncio
-async def test_send_status_with_none_channel_is_silent(monkeypatch):
-    """Audit micro-nit: _stop_voice may be called from on_close with
-    channel=None. There is no future on_open to drain to, so _send_status
-    must return silently — NOT crash on None.readyState."""
+async def test_send_status_with_none_channel_queues():
+    """Session-lifecycle promotion (2026-04-17): pre-warm runs at offer-time,
+    BEFORE the data channel exists. _send_status must queue on channel=None so
+    pre-warm errors (reason="model"/"token") reach the PWA when on_open drains.
+
+    Must NOT crash on None.readyState — the original invariant still holds.
+    """
     host = _make_host()
-    # Should simply not raise.
-    host._send_status(None, {"type": "voice-status", "status": "idle"})
-    assert host._pending_status_flushes == []
+    # Must not raise.
+    host._send_status(None, {"type": "voice-status", "status": "error", "reason": "model"})
+    # Must queue — not silently dropped.
+    assert len(host._pending_status_flushes) == 1
+    assert host._pending_status_flushes[0]["reason"] == "model"
 
 
 @pytest.mark.asyncio

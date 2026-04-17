@@ -86,6 +86,94 @@ export function unlockAudioContext(): void {
   }
 }
 
+// ─── STT Pre-warm (module-level, indicator-free) ───────────────────────────
+//
+// Pre-warmed at connect time from a user-gesture (preserves iOS gesture chain
+// for audioWorklet.addModule). Does NOT call getUserMedia — the mic indicator
+// only lights when startListening() runs, preserving the "mic lights = I'm
+// being listened to" UX contract.
+
+let _sttAudioCtx: AudioContext | null = null;
+let _sttGain: GainNode | null = null;
+let _sttAudioReady = false;
+let _sttInputSampleRate = 16000;
+
+export function isSttAudioReady(): boolean {
+  return _sttAudioReady;
+}
+
+export function getSttAudioCtx(): AudioContext | null {
+  return _sttAudioCtx;
+}
+
+export function getSttGain(): GainNode | null {
+  return _sttGain;
+}
+
+export function getSttInputSampleRate(): number {
+  return _sttInputSampleRate;
+}
+
+/**
+ * Warm `new AudioContext({sampleRate: 16000})` + `audioWorklet.addModule` at
+ * connect time so startListening() only pays the cost of getUserMedia.
+ * MUST be called from inside a user-gesture handler (iOS Safari requires a
+ * gesture-scoped Promise chain for audioWorklet.addModule).
+ *
+ * Idempotent: no-op if already warm. Silent failure falls back to cold-start
+ * inside startListening().
+ */
+export async function prewarmAudio(): Promise<void> {
+  if (_sttAudioReady) return;
+  if (typeof AudioContext === "undefined") return;
+  if (process.env.NEXT_PUBLIC_AUDIO_PREWARM === "false") return;
+  try {
+    const audioCtx = new AudioContext({ sampleRate: 16000 });
+    _sttAudioCtx = audioCtx;
+    _sttInputSampleRate = audioCtx.sampleRate;
+
+    const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
+    const workletUrl = URL.createObjectURL(blob);
+    try {
+      await audioCtx.audioWorklet.addModule(workletUrl);
+    } finally {
+      URL.revokeObjectURL(workletUrl);
+    }
+
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0;
+    gain.connect(audioCtx.destination);
+    _sttGain = gain;
+
+    _sttAudioReady = true;
+    console.info(
+      "[voice] audio pre-warm complete — rate=%d",
+      audioCtx.sampleRate,
+    );
+  } catch (err) {
+    console.warn("[voice] audio pre-warm failed — will cold-start:", err);
+    _sttAudioCtx = null;
+    _sttGain = null;
+    _sttAudioReady = false;
+  }
+}
+
+/**
+ * Full teardown on leaving the connected session. Called from use-session's
+ * disconnect path. startListening's cold path will re-bootstrap on next use.
+ */
+export async function teardownAudioPrewarm(): Promise<void> {
+  if (_sttAudioCtx) {
+    try { _sttGain?.disconnect(); } catch { /* ignore */ }
+    try { await _sttAudioCtx.close(); } catch { /* ignore */ }
+  }
+  _sttAudioCtx = null;
+  _sttGain = null;
+  _sttAudioReady = false;
+  _sttInputSampleRate = 16000;
+  console.info("[voice] audio teardown complete");
+}
+
 // ─── TTS Playback ───────────────────────────────────────────────────────────
 
 let _currentAudio: HTMLAudioElement | null = null;
@@ -138,18 +226,27 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
   const streamRef = useRef<MediaStream | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const gainRef = useRef<GainNode | null>(null);
+  // Cold-path only — holds the AudioContext created inside startListening().
+  // Warm path uses the module-level _sttAudioCtx via getSttAudioCtx().
+  const coldAudioCtxRef = useRef<AudioContext | null>(null);
+  // Cold-path only. Warm path references the module-level _sttGain.
+  const coldGainRef = useRef<GainNode | null>(null);
   const mutedRef = useRef(false);
   const inputSampleRateRef = useRef<number>(16000);
+  // Live reference so the worklet onmessage closure always reads the
+  // current DC — without this, a reconnect (new DC, same PWA tab) would
+  // leave tap #2 shipping audio over a dead channel.
+  const dataChannelRef = useRef<RTCDataChannel | null>(dataChannel);
+  dataChannelRef.current = dataChannel;
 
   // iOS 17.4+ may GC the worklet while muted even with the gain(0) workaround.
   // On unmute we tear down source/worklet but keep audioCtx + gain + stream,
   // then rebuild the graph. Safe to call any time status=="listening".
   const rebuildWorkletGraph = useCallback(() => {
-    const audioCtx = audioCtxRef.current;
+    // Prefer the warm AudioContext if pre-warm succeeded this session.
+    const audioCtx = getSttAudioCtx() ?? coldAudioCtxRef.current;
+    const gain = getSttGain() ?? coldGainRef.current;
     const stream = streamRef.current;
-    const gain = gainRef.current;
     if (!audioCtx || !stream || !gain) return;
     if (useVoiceStore.getState().status !== "listening") return;
 
@@ -165,13 +262,14 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
     workletRef.current = worklet;
     worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
       if (mutedRef.current) return;
-      if (dataChannel && dataChannel.readyState === "open") {
-        dataChannel.send(e.data);
+      const dc = dataChannelRef.current;
+      if (dc && dc.readyState === "open") {
+        dc.send(e.data);
       }
     };
     source.connect(worklet);
     worklet.connect(gain);
-  }, [dataChannel]);
+  }, []);
 
   const startListening = useCallback(
     async (mode: VoiceMode) => {
@@ -205,9 +303,105 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
           return;
         }
 
+        // ── Warm path ────────────────────────────────────────────────────
+        // prewarmAudio() already created AudioContext + loaded the worklet
+        // module + built the silent gain node. We just need getUserMedia
+        // (the one API that lights the OS mic indicator) + graph wiring.
+        const warmCtx = getSttAudioCtx();
+        const warmGain = getSttGain();
+        if (isSttAudioReady() && warmCtx && warmGain) {
+          const audioCtx = warmCtx;
+          const gain = warmGain;
+
+          // Mobile browsers suspend the AudioContext when the PWA backgrounds.
+          // Without resume() the warm fast-path silently emits zero PCM.
+          if (audioCtx.state === "suspended") {
+            await audioCtx.resume();
+          }
+
+          const inputSampleRate = audioCtx.sampleRate;
+          inputSampleRateRef.current = inputSampleRate;
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              sampleRate: 16000,
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+          streamRef.current = stream;
+
+          try {
+            dataChannel.send(JSON.stringify({
+              type: "mic-info",
+              sampleRate: inputSampleRate,
+              channelCount: 1,
+              userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "unknown",
+            }));
+          } catch { /* channel closed between check and send */ }
+
+          const audioTrack = stream.getAudioTracks()[0];
+          if (audioTrack) {
+            audioTrack.onended = () => {
+              console.warn("[voice] Audio track ended — mic was revoked or taken by another app");
+              if (dataChannel.readyState === "open") {
+                try { dataChannel.send(JSON.stringify({ type: "voice-stop", reason: "track-ended" })); }
+                catch { /* ignore */ }
+              }
+              stopListening("track-ended");
+              useVoiceStore.getState().setMicError("Mic disconnected");
+            };
+            audioTrack.onmute = () => {
+              console.warn("[voice] Audio track muted by OS/browser");
+              mutedRef.current = true;
+              useVoiceStore.getState().setMicError("Mic paused by OS");
+            };
+            audioTrack.onunmute = () => {
+              console.info("[voice] Audio track unmuted");
+              mutedRef.current = false;
+              useVoiceStore.getState().setMicError(null);
+              rebuildWorkletGraph();
+            };
+          }
+
+          // Guard: stopListening() may have run during the getUserMedia await
+          if (!isSttAudioReady()) {
+            stream.getTracks().forEach((t) => t.stop());
+            streamRef.current = null;
+            return;
+          }
+
+          const source = audioCtx.createMediaStreamSource(stream);
+          sourceRef.current = source;
+
+          const worklet = new AudioWorkletNode(audioCtx, "pcm-processor", {
+            processorOptions: { inputSampleRate },
+          });
+          workletRef.current = worklet;
+
+          // Rebind every call: the closure captures dataChannelRef.current, so
+          // a reconnect (same PWA tab, new DC) doesn't leave tap #N shipping
+          // audio over a dead channel.
+          worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+            if (mutedRef.current) return;
+            const dc = dataChannelRef.current;
+            if (dc && dc.readyState === "open") {
+              dc.send(e.data);
+            }
+          };
+
+          source.connect(worklet);
+          worklet.connect(gain);
+          return;
+        }
+
+        // ── Cold path ────────────────────────────────────────────────────
+        // Pre-warm was skipped (flag off) or failed. Full legacy setup.
+
         // Create AudioContext BEFORE await — preserves user-gesture token on mobile
         const audioCtx = new AudioContext({ sampleRate: 16000 });
-        audioCtxRef.current = audioCtx;
+        coldAudioCtxRef.current = audioCtx;
 
         // Android Chrome / Pixel often ignores the 16 kHz request and runs the
         // context at the device native rate (48 kHz). Read the actual rate and
@@ -272,7 +466,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         }
 
         // Guard: stopListening() may have run during the getUserMedia await
-        if (!audioCtxRef.current) {
+        if (!coldAudioCtxRef.current) {
           stream.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
           return;
@@ -294,7 +488,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         }
 
         // Guard: stopListening() may have run during the addModule await
-        if (!audioCtxRef.current) return;
+        if (!coldAudioCtxRef.current) return;
 
         const source = audioCtx.createMediaStreamSource(stream);
         sourceRef.current = source;
@@ -304,11 +498,13 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         });
         workletRef.current = worklet;
 
-        // Send PCM chunks to host as binary
+        // Send PCM chunks to host as binary. Read DC through the ref so this
+        // closure survives a reconnect cycle.
         worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
           if (mutedRef.current) return;  // OS paused the mic — don't ship zeros
-          if (dataChannel.readyState === "open") {
-            dataChannel.send(e.data);
+          const dc = dataChannelRef.current;
+          if (dc && dc.readyState === "open") {
+            dc.send(e.data);
           }
         };
 
@@ -317,7 +513,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         // (Safari GC's disconnected worklet nodes)
         const gain = audioCtx.createGain();
         gain.gain.value = 0;
-        gainRef.current = gain;
+        coldGainRef.current = gain;
 
         source.connect(worklet);
         worklet.connect(gain);
@@ -344,26 +540,32 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
     const why = reason || "unknown";
     console.trace(`[voice] stopListening called — reason: ${why}`);
 
-    // Tear down audio pipeline
-    if (gainRef.current) {
-      gainRef.current.disconnect();
-      gainRef.current = null;
-    }
+    // Per-turn teardown: release mic + disconnect source/worklet so the OS
+    // mic indicator goes OFF. Keep the warm AudioContext + silent gain so
+    // the next voice-tap takes the fast path.
     if (workletRef.current) {
-      workletRef.current.disconnect();
+      try { workletRef.current.disconnect(); } catch { /* ignore */ }
       workletRef.current = null;
     }
     if (sourceRef.current) {
-      sourceRef.current.disconnect();
+      try { sourceRef.current.disconnect(); } catch { /* ignore */ }
       sourceRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
+    }
+
+    // Cold-path teardown: if startListening bootstrapped its own context
+    // (pre-warm disabled / failed), close it here. Warm context lives at
+    // module level and is torn down in teardownAudioPrewarm() on disconnect.
+    if (coldGainRef.current) {
+      try { coldGainRef.current.disconnect(); } catch { /* ignore */ }
+      coldGainRef.current = null;
+    }
+    if (coldAudioCtxRef.current) {
+      try { coldAudioCtxRef.current.close(); } catch { /* ignore */ }
+      coldAudioCtxRef.current = null;
     }
 
     // Tell host we're done
@@ -410,10 +612,10 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
-      gainRef.current?.disconnect();
-      workletRef.current?.disconnect();
-      sourceRef.current?.disconnect();
-      audioCtxRef.current?.close();
+      try { workletRef.current?.disconnect(); } catch { /* ignore */ }
+      try { sourceRef.current?.disconnect(); } catch { /* ignore */ }
+      try { coldGainRef.current?.disconnect(); } catch { /* ignore */ }
+      try { coldAudioCtxRef.current?.close(); } catch { /* ignore */ }
     };
   }, []);
 

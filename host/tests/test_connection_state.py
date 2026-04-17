@@ -40,6 +40,22 @@ def host_with_recorder(monkeypatch):
     host.session_id = "test-session-id"
     host._ice_servers_json = [{"urls": "stun:stun.l.google.com:19302"}]
     host._turn_status = "none"
+    host._voice_active = False
+    host._voice_mode = None
+    host._gemini = None
+    host._gemini_restarting = False
+    host._voice_starting_task = None
+    host._no_audio_watchdog = None
+    host._mid_session_watchdog = None
+    host._last_audio_chunk_ts = 0.0
+    host._mic_info = None
+    host._pending_status_flushes = []
+    host._gemini_ready = None
+    host._gemini_prewarm_task = None
+    host._voice_start_ts = None
+    host._voice_start_logged = False
+    host.data_channel = None
+    host.pc = None
 
     return host, pc_status_calls, signaling_writes
 

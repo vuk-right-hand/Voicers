@@ -3,7 +3,13 @@
 import { create } from "zustand";
 import type { PcStatus, TransportStatus, PhoneCommand } from "@/types";
 import { initiateCall } from "@/lib/webrtc/peer";
-import { useVoiceStore, playTTSAudio, friendlyMessageFor } from "@/hooks/use-voice";
+import {
+  useVoiceStore,
+  playTTSAudio,
+  friendlyMessageFor,
+  prewarmAudio,
+  teardownAudioPrewarm,
+} from "@/hooks/use-voice";
 import { CLIPBOARD_TIMEOUT_MS } from "@/lib/constants";
 
 interface SessionState {
@@ -78,6 +84,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Clean up any existing connection
     _close?.();
     set({ sessionId, transportStatus: "signaling", mediaStream: null, dataChannel: null });
+
+    // Indicator-free audio pre-warm. Runs inside the user-gesture stack so
+    // iOS Safari allows audioWorklet.addModule. Fire-and-forget: failures
+    // fall back to cold-start inside startListening().
+    void prewarmAudio();
 
     const { pc, close } = initiateCall(
       sessionId,
@@ -221,6 +232,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       clearTimeout(_disconnectTimer);
       _disconnectTimer = null;
     }
+    // Tear down the warm STT AudioContext so a later reconnect pre-warms a
+    // fresh one. Fire-and-forget — close() is async but we don't wait.
+    void teardownAudioPrewarm();
     set({
       transportStatus: "idle",
       mediaStream: null,

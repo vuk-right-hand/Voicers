@@ -213,6 +213,18 @@ class WebRTCHost:
         self._mic_info: dict | None = None
         self._pending_status_flushes: list[dict] = []
 
+        # Session-lifecycle promotion (2026-04-17). Gemini session is now per
+        # WebRTC connection: pre-warm fires at offer-time, teardown on DC
+        # close / bye / conn-state-closed. _start_voice awaits _gemini_ready
+        # before calling begin_turn() — the only per-turn entry point.
+        self._gemini_ready: asyncio.Event | None = None
+        self._gemini_prewarm_task: asyncio.Task | None = None
+        # Tap-to-first-transcript telemetry. None until _start_voice stamps
+        # it; reset in _stop_voice for per-turn lifecycle symmetry. _logged
+        # flag so only the first transcription of a turn logs the delta.
+        self._voice_start_ts: float | None = None
+        self._voice_start_logged: bool = False
+
         # Clipboard watcher (pushes PC clipboard changes to phone)
         self._clipboard_watcher = ClipboardWatcher(callback=self._on_clipboard_change)
 
@@ -310,6 +322,17 @@ class WebRTCHost:
                 "reason": "subscription_expired",
             })
             return
+
+        # Gemini pre-warm fires at offer-time, BEFORE setRemoteDescription.
+        # DC on_open lands 1-2 s later (ICE gathering + DTLS) — running the
+        # Gemini handshake in parallel with ICE reclaims that window as a
+        # free latency win on tap #1. Env-var rollback: GEMINI_PREWARM=false
+        # leaves _gemini_ready None and forces _start_voice down the legacy
+        # create-and-start-inline branch.
+        if os.environ.get("GEMINI_PREWARM", "true").lower() == "true":
+            self._gemini_ready = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            self._gemini_prewarm_task = loop.create_task(self._prewarm_gemini())
 
         # Clean up any previous connection
         if self.pc:
@@ -555,29 +578,30 @@ class WebRTCHost:
         def on_close():
             logger.info("Data channel closed")
             self._clipboard_watcher.stop()
-            # Clean up any active voice session on disconnect
+            loop = asyncio.get_running_loop()
+            # Clean up any active voice turn first so flush_final runs.
             if self._voice_active:
-                loop = asyncio.get_running_loop()
                 loop.create_task(self._stop_voice(channel=None))
+            # Then tear down the connection-lifetime Gemini session.
+            loop.create_task(self._teardown_gemini())
 
     def _send_status(self, channel, payload: dict) -> None:
         """Send a voice-status / diagnostic payload, queueing if the channel
         isn't ready.
 
-        - channel is None (e.g. _stop_voice fired from on_close):
-          drop silently — there is no future on_open to drain to.
-        - channel.readyState == "open": send directly.
-        - otherwise: append to _pending_status_flushes, drained by on_open.
+        Session-lifecycle promotion (2026-04-17): now that pre-warm errors
+        can surface before the data channel exists at all (offer-time
+        _prewarm_gemini), we MUST queue when channel is None and not drop
+        silently. The pending list drains in the data channel's on_open.
         """
-        if channel is None:
+        if channel is None or getattr(channel, "readyState", None) != "open":
+            self._pending_status_flushes.append(payload)
             return
         try:
-            if channel.readyState == "open":
-                channel.send(json.dumps(payload))
-            else:
-                self._pending_status_flushes.append(payload)
+            channel.send(json.dumps(payload))
         except Exception:
             logger.exception("Failed to send status payload: %s", payload)
+            self._pending_status_flushes.append(payload)
 
     @staticmethod
     def _classify_start_error(exc: BaseException) -> str:
@@ -653,67 +677,206 @@ class WebRTCHost:
         except asyncio.CancelledError:
             pass
 
-    async def _start_voice(self, channel):
-        """Start a Gemini Live STT session.
+    async def _prewarm_gemini(self):
+        """Open the Gemini session at WebRTC-offer time so voice-tap is fast.
 
-        Wraps Gemini.start() in try/except and classifies the exception onto a
-        fixed taxonomy ("token" / "model" / "handshake" / "unknown"). PWA maps
-        these to friendly copy via friendlyMessageFor(). See _classify_start_error.
+        Runs once per connection. Callbacks bind lazily against
+        self.data_channel (NOT a captured channel local — the channel doesn't
+        exist yet at offer-time). On success, sets _gemini_ready so
+        _start_voice can proceed immediately on the first voice-tap.
         """
-        self._voice_active = True
-        self._last_audio_chunk_ts = 0.0
+        prewarm_start_ts = time.monotonic()
+        # Idempotency: if a stale session leaked (offer-arrives-twice,
+        # ICE re-answer), tear it down first so we don't leak a GeminiLive.
+        await self._teardown_gemini()
+
+        # Capture the Event we intend to signal. If teardown later nulls the
+        # instance attribute, we can still wake the original waiter.
+        ready_event = self._gemini_ready
+
+        host = self
 
         def on_transcript(text: str, is_final: bool):
-            """Forward transcription to phone over data channel."""
-            if channel.readyState == "open":
-                channel.send(json.dumps({
-                    "type": "stt",
-                    "text": text,
-                    "is_final": is_final,
-                }))
+            # Phantom-transcript guard: Gemini occasionally emits hallucinated
+            # text during the silent pre-warm window before the user's first
+            # tap. _turn_counter == 0 means "no voice-tap yet" — drop it.
+            if host._gemini is None or host._gemini._turn_counter == 0:
+                return
+
+            # Tap-to-first-transcript telemetry. Fires once per turn.
+            if host._voice_start_ts is not None and not host._voice_start_logged:
+                delta_ms = int((time.monotonic() - host._voice_start_ts) * 1000)
+                logger.info("tap-to-first-transcript=%dms", delta_ms)
+                host._voice_start_logged = True
+
+            dc = host.data_channel
+            if dc is not None and dc.readyState == "open":
+                try:
+                    dc.send(json.dumps({
+                        "type": "stt",
+                        "text": text,
+                        "is_final": is_final,
+                    }))
+                except Exception:
+                    logger.exception("Failed to forward transcript")
 
         def on_session_dead():
-            """Gemini WebSocket dropped — restart transparently."""
-            if self._voice_active:
+            if host._voice_active:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._restart_gemini(channel))
+                loop.create_task(host._restart_gemini(host.data_channel))
 
         try:
-            self._gemini = GeminiLive(on_transcript=on_transcript, on_session_dead=on_session_dead)
+            self._gemini = GeminiLive(
+                on_transcript=on_transcript, on_session_dead=on_session_dead,
+            )
             await self._gemini.start()
-        except asyncio.CancelledError:
-            # _stop_voice cancelled us mid-connect (user double-tapped). Clean
-            # up any partial state and swallow — stop already ran.
-            logger.info("_start_voice cancelled — double-tap race")
-            if self._gemini is not None:
-                try:
-                    await self._gemini.stop()
-                except Exception:
-                    pass
-                self._gemini = None
-            self._voice_active = False
-            self._voice_mode = None
-            raise
         except Exception as exc:
             reason = self._classify_start_error(exc)
             logger.exception(
-                "Gemini Live start failed — reason=%s mic_info=%s",
+                "Gemini pre-warm failed — reason=%s mic_info=%s",
                 reason, self._mic_info,
             )
-            self._send_status(channel, {
+            # Queue the error — data channel is probably still opening.
+            # on_open drains _pending_status_flushes and delivers this.
+            self._send_status(self.data_channel, {
                 "type": "voice-status",
                 "status": "error",
                 "reason": reason,
                 "detail": f"{type(exc).__name__}: {exc}",
             })
+            self._gemini = None
+        finally:
+            self._gemini_prewarm_task = None
+            # Always signal ready (success OR failure) so _start_voice's
+            # wait_for unblocks immediately. On failure _gemini is None and
+            # _start_voice returns without emitting its own timeout error.
+            # Use the captured event so a concurrent teardown that nulls
+            # self._gemini_ready can't orphan the waiter.
+            if ready_event is not None:
+                ready_event.set()
+
+        if self._gemini is not None:
+            elapsed_ms = int((time.monotonic() - prewarm_start_ts) * 1000)
+            logger.info(
+                "Gemini pre-warm complete (ready for voice-tap) — %dms", elapsed_ms,
+            )
+
+    async def _teardown_gemini(self):
+        """Single session-death point. Idempotent — safe to call repeatedly.
+
+        Called from DC on_close, _on_bye, _on_connection_state("closed"|"failed"),
+        and _prewarm_gemini on entry (for the offer-arrives-twice case).
+        """
+        if self._gemini_prewarm_task is not None and not self._gemini_prewarm_task.done():
+            self._gemini_prewarm_task.cancel()
+            try:
+                await self._gemini_prewarm_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._gemini_prewarm_task = None
+
+        if self._gemini is None:
+            # Preserve _gemini_ready — caller (e.g. _prewarm_gemini's
+            # idempotency entry) may have just allocated the Event and is
+            # waiting on it. Nulling it here would orphan that waiter.
+            return
+
+        try:
+            await self._gemini.stop()
+        except Exception:
+            logger.exception("Gemini.stop() during teardown failed — continuing")
+        self._gemini = None
+        self._gemini_ready = None
+        logger.info("Gemini session torn down (connection-lifetime)")
+
+    async def _start_voice(self, channel):
+        """Enter a new turn on the pre-warmed Gemini session.
+
+        Session-lifecycle promotion (2026-04-17): the Gemini session lives for
+        the WebRTC connection; this method only opens a new turn via
+        begin_turn(). If pre-warm hasn't completed yet (fast double-tap on
+        connect), we wait for _gemini_ready. If pre-warm was skipped (flag
+        off or never fired), we spawn it inline and await.
+
+        Error taxonomy: "token"/"model"/"handshake"/"unknown". PWA maps these
+        to friendly copy via friendlyMessageFor().
+        """
+        self._voice_active = True
+        self._last_audio_chunk_ts = 0.0
+        # Tap-to-first-transcript telemetry — stamped now, logged by
+        # on_transcript on the first transcript of this turn.
+        self._voice_start_ts = time.monotonic()
+        self._voice_start_logged = False
+
+        try:
+            # Defensive branch: pre-warm flag was off or never fired — fall
+            # back to legacy cold-start. _gemini_ready stays None so a second
+            # voice-start doesn't wait forever.
+            if self._gemini_ready is None:
+                logger.info("_start_voice: no pre-warm — spawning inline")
+                self._gemini_ready = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                self._gemini_prewarm_task = loop.create_task(self._prewarm_gemini())
+
+            try:
+                await asyncio.wait_for(self._gemini_ready.wait(), timeout=8.0)
+            except asyncio.TimeoutError:
+                logger.warning("_start_voice: pre-warm didn't complete within 8 s")
+                self._send_status(channel, {
+                    "type": "voice-status",
+                    "status": "error",
+                    "reason": "handshake",
+                    "detail": "Pre-warm timeout",
+                })
+                self._voice_active = False
+                self._voice_mode = None
+                self._voice_start_ts = None
+                return
+
+            if self._gemini is None:
+                # Pre-warm reported ready but _gemini is None — pre-warm failed
+                # and already emitted its own error status. Nothing more to do.
+                self._voice_active = False
+                self._voice_mode = None
+                self._voice_start_ts = None
+                return
+
+            # Passive stale-session detection. If the pre-warmed session died
+            # idly (GoAway without restart, network blip), begin_turn() raises
+            # and we trigger a restart before surfacing the error.
+            try:
+                await asyncio.wait_for(self._gemini.begin_turn(), timeout=2.0)
+            except (RuntimeError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "begin_turn failed (%s) — triggering restart", exc,
+                )
+                # Fire-and-await restart; subsequent taps warm again.
+                try:
+                    await self._restart_gemini(channel)
+                except Exception:
+                    logger.exception("Restart after stale session failed")
+                # Surface the handshake error regardless — this tap is lost.
+                self._send_status(channel, {
+                    "type": "voice-status",
+                    "status": "error",
+                    "reason": "handshake",
+                    "detail": f"Stale session: {type(exc).__name__}",
+                })
+                self._voice_active = False
+                self._voice_mode = None
+                self._voice_start_ts = None
+                return
+        except asyncio.CancelledError:
+            # _stop_voice cancelled us mid-pre-warm-wait (user double-tapped).
+            logger.info("_start_voice cancelled — double-tap race")
             self._voice_active = False
             self._voice_mode = None
-            self._gemini = None
-            return
+            self._voice_start_ts = None
+            raise
         finally:
             self._voice_starting_task = None
 
-        if channel.readyState == "open":
+        if channel is not None and channel.readyState == "open":
             channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
         # Arm the 3 s no-audio watchdog. Cancelled on first binary chunk.
@@ -749,11 +912,20 @@ class WebRTCHost:
             channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
     async def _stop_voice(self, channel=None):
-        """Stop the active Gemini Live session and flush final transcript."""
+        """Close the current voice-turn. Does NOT tear down the Gemini session.
+
+        Session-lifecycle promotion (2026-04-17): flush_final() remains the
+        only supported voice-stop path (invariant #4). The Gemini session
+        survives — _teardown_gemini is the single death point, called only
+        from DC close / bye / conn-state-closed.
+        """
         self._voice_active = False
         self._voice_mode = None
+        # Reset TTF telemetry for per-turn lifecycle symmetry.
+        self._voice_start_ts = None
+        self._voice_start_logged = False
 
-        # Cancel any in-flight start (user double-tapped during 1 s Gemini connect).
+        # Cancel any in-flight start (user double-tapped during pre-warm wait).
         if self._voice_starting_task is not None and not self._voice_starting_task.done():
             self._voice_starting_task.cancel()
             try:
@@ -762,7 +934,7 @@ class WebRTCHost:
                 pass
             self._voice_starting_task = None
 
-        # Cancel watchdogs before tearing down Gemini so they can't fire mid-stop.
+        # Cancel watchdogs before flushing so they can't fire mid-stop.
         for task_attr in ("_no_audio_watchdog", "_mid_session_watchdog"):
             task = getattr(self, task_attr)
             if task is not None and not task.done():
@@ -785,12 +957,11 @@ class WebRTCHost:
                     }))
                 except Exception:
                     logger.exception("Failed to send final stt")
-            await self._gemini.stop()
-            self._gemini = None
+            # NOTE: session survives — no .stop(), no self._gemini = None.
 
         self._send_status(channel, {"type": "voice-status", "status": "idle"})
 
-        logger.info("Voice session stopped")
+        logger.info("Voice session stopped (turn ended, Gemini session reused)")
 
     async def _on_bye(self):
         """Explicit phone-initiated disconnect.
@@ -803,6 +974,15 @@ class WebRTCHost:
         consent times out, blocking instant reconnects.
         """
         logger.info("Bye received — tearing down and republishing host-ready")
+        # Close the current voice turn first so flush_final runs before we
+        # pull the Gemini session out from under it.
+        if self._voice_active:
+            try:
+                await self._stop_voice(channel=None)
+            except Exception:
+                logger.exception("_stop_voice during bye failed")
+        # Session teardown — connection is going away.
+        await self._teardown_gemini()
         if self.pc:
             try:
                 await self.pc.close()
@@ -831,6 +1011,8 @@ class WebRTCHost:
             # Don't tear down; let the ICE agent attempt recovery.
             logger.info("Connection disconnected (transient) — waiting for recovery")
         elif state in ("failed", "closed"):
+            # Covers abrupt ICE failure where DC on_close may never fire.
+            await self._teardown_gemini()
             await update_pc_status_async(self.session_id, "waiting")
             await write_signaling_async(self.session_id, {
                 "type": "host-ready",

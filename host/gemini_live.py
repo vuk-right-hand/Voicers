@@ -165,6 +165,20 @@ class GeminiLive:
         # Rolling 5 s RMS window over the last N chunks (~50 at 100 ms).
         self._rms_window: list[float] = []
 
+        # ── Session-lifecycle promotion (2026-04-17): per-turn tracking.
+        # The session is now per-WebRTC-connection (opened on SDP offer,
+        # closed on DC close / bye / conn-state-closed). begin_turn() runs
+        # once per voice-tap to reset per-turn state and cycle activity
+        # boundaries. _turn_counter == 0 means "pre-warm window, no user
+        # tap yet" — the first activity_start from start() is still open,
+        # so begin_turn() must skip the redundant end/start pair.
+        self._turn_counter: int = 0
+        # Starts "done" (set) — only clears during an in-flight restart so
+        # begin_turn() can block instead of timing out and piling on a
+        # redundant second restart.
+        self._restart_done_event: asyncio.Event = asyncio.Event()
+        self._restart_done_event.set()
+
     async def start(self, _preserve_buffer: bool = False) -> None:
         """Open Gemini Live session and start send/recv/flush background tasks."""
         # ── CAUSE A fix ─────────────────────────────────────────────────────
@@ -288,6 +302,65 @@ class GeminiLive:
             if not self._restarting:
                 logger.warning("Gemini audio queue full — dropping chunk")
 
+    async def begin_turn(self) -> None:
+        """Reset per-turn state and reopen the activity window for a voice-tap.
+
+        Session-lifecycle promotion (2026-04-17): start()/stop() run once per
+        WebRTC connection; begin_turn() runs once per voice-tap. Per-turn state
+        (interim_buffer, TTF timestamps, RMS window, peak queue) is reset here.
+        Session-lifetime counters (chunks/transcriptions/flushes totals)
+        accumulate across turns for diagnostic logs.
+
+        Ordering matters:
+          1. Wait for any in-flight restart() to complete (up to 3 s). Without
+             this, a voice-tap landing mid-29-min-token-refresh would race the
+             restart and trigger a redundant second one.
+          2. Check preconditions on the live session — caller catches
+             RuntimeError and routes to _restart_gemini.
+          3. Reset per-turn state.
+          4. Under _activity_lock, cycle activity_end → activity_start (skip on
+             turn #1 — start() already opened the first activity window during
+             pre-warm and sending a redundant end/start would be noise).
+        """
+        if self._restarting or not self._restart_done_event.is_set():
+            # 3 s is deliberately longer than _start_voice's 2 s wait_for so
+            # the restart has a real chance to finish before the caller times
+            # out and falls through to its own _restart_gemini path.
+            await asyncio.wait_for(self._restart_done_event.wait(), timeout=3.0)
+
+        if not self._active or self._session is None:
+            raise RuntimeError("begin_turn on dead session")
+
+        self.interim_buffer = ""
+        self._first_audio_ts = None
+        self._first_transcription_ts = None
+        self._rms_window.clear()
+        self._peak_qsize = 0
+        self._filter_rejections = 0
+        self._start_ts = time.monotonic()
+
+        self._final_signal.clear()
+
+        async with self._activity_lock:
+            if self._turn_counter == 0:
+                # First turn — start() already sent activity_start during
+                # pre-warm; don't send a redundant end/start pair.
+                self._turn_active = True
+            else:
+                if self._turn_active:
+                    await self._session.send_realtime_input(
+                        activity_end=types.ActivityEnd()
+                    )
+                    self._turn_active = False
+                await self._session.send_realtime_input(
+                    activity_start=types.ActivityStart()
+                )
+                self._last_activity_start = time.monotonic()
+                self._turn_active = True
+
+        self._turn_counter += 1
+        logger.info("begin_turn #%d — per-turn state reset", self._turn_counter)
+
     async def stop(self) -> None:
         """Gracefully shut down: cancel tasks, drain queue, close session."""
         self._active = False
@@ -329,6 +402,10 @@ class GeminiLive:
         """Tear down and reopen, preserving interim_buffer and resumption handle."""
         saved_buffer = self.interim_buffer
         self._restarting = True
+        # Block begin_turn() from racing a mid-flight restart — a voice-tap
+        # landing during the 29-min token refresh would otherwise timeout on
+        # its own 2 s wait_for and pile on a redundant second restart.
+        self._restart_done_event.clear()
 
         self._active = False
         tasks = [t for t in [self._send_task, self._recv_task, self._flush_task, self._token_expiry_task] if t]
@@ -356,6 +433,7 @@ class GeminiLive:
             await self.start(_preserve_buffer=True)
         finally:
             self._restarting = False
+            self._restart_done_event.set()
         logger.info("Gemini session restarted — buffer preserved (%d chars), queued chunks: %d",
                      len(saved_buffer), self._audio_queue.qsize())
 

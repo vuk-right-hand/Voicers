@@ -60,13 +60,25 @@ def _make_host() -> webrtc_host.WebRTCHost:
     host._last_audio_chunk_ts = 0.0
     host._mic_info = None
     host._pending_status_flushes = []
+    host._gemini_ready = None
+    host._gemini_prewarm_task = None
+    host._voice_start_ts = None
+    host._voice_start_logged = False
+    host.data_channel = None
     return host
 
 
 async def _install_stub_gemini(host: webrtc_host.WebRTCHost, monkeypatch) -> None:
-    """Swap GeminiLive.start so it completes instantly without a real WS."""
+    """Swap GeminiLive.start / begin_turn / stop / flush_final so the test
+    drives _start_voice without touching a real Gemini WebSocket."""
     async def fake_start(self, _preserve_buffer: bool = False):
         self._active = True
+
+    async def fake_begin_turn(self):
+        # Session-lifecycle promotion: _start_voice now calls begin_turn()
+        # after the pre-warm wait. Real begin_turn raises if _session is None;
+        # for these watchdog tests we only need it to no-op cleanly.
+        self._turn_counter += 1
 
     async def fake_stop(self):
         self._active = False
@@ -75,6 +87,7 @@ async def _install_stub_gemini(host: webrtc_host.WebRTCHost, monkeypatch) -> Non
         return ""
 
     monkeypatch.setattr(gemini_live.GeminiLive, "start", fake_start)
+    monkeypatch.setattr(gemini_live.GeminiLive, "begin_turn", fake_begin_turn)
     monkeypatch.setattr(gemini_live.GeminiLive, "stop", fake_stop)
     monkeypatch.setattr(gemini_live.GeminiLive, "flush_final", fake_flush_final)
 
@@ -228,10 +241,12 @@ async def test_mid_session_watchdog_auto_stops_when_voice_stop_dropped(
     await asyncio.sleep(0.35)
 
     # Invariants: auto-stop ran.
+    # Session-lifecycle promotion (2026-04-17): _stop_voice closes the turn
+    # but keeps the GeminiLive session alive for the next tap. The session
+    # dies only at _teardown_gemini (DC close / bye / conn-state-failed).
     assert host._voice_active is False, (
         "Mid-session watchdog did not auto-stop after gap — Cause K regression"
     )
-    assert host._gemini is None, "Gemini session not disposed by auto-stop"
 
     statuses = [json.loads(s) for s in channel.sends]
     assert any(s.get("status") == "idle" for s in statuses), (
