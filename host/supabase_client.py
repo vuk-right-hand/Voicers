@@ -198,21 +198,45 @@ async def subscribe_signaling(session_id: str, callback: Callable[[dict], None])
                         await ws.send(json.dumps(join_msg))
                         logger.info("Subscribed to Realtime for session %s", session_id)
 
-                        # Heartbeat task
+                        # Heartbeat task — also tracks acks. If Supabase stops replying to
+                        # heartbeats, the subscription is silently dead (Phoenix channels
+                        # can be closed server-side without a WS close frame). Force a
+                        # reconnect so the listener doesn't sit forever on a zombie sub.
+                        last_ack = time.monotonic()
+                        last_ack_lock = asyncio.Lock()
+
                         async def heartbeat():
+                            nonlocal last_ack
                             while True:
                                 await asyncio.sleep(30)
-                                await ws.send(json.dumps({
-                                    "topic": "phoenix",
-                                    "event": "heartbeat",
-                                    "payload": {},
-                                    "ref": "hb",
-                                }))
+                                try:
+                                    await ws.send(json.dumps({
+                                        "topic": "phoenix",
+                                        "event": "heartbeat",
+                                        "payload": {},
+                                        "ref": "hb",
+                                    }))
+                                except Exception:
+                                    return
+                                # If we haven't seen any ack or event in 90s (3 missed
+                                # heartbeats), the sub is dead — force the outer loop
+                                # to reconnect by closing the WS.
+                                async with last_ack_lock:
+                                    silent_for = time.monotonic() - last_ack
+                                if silent_for > 90:
+                                    logger.warning(
+                                        "Realtime silent for %.0fs — forcing reconnect",
+                                        silent_for,
+                                    )
+                                    await ws.close()
+                                    return
 
                         hb_task = asyncio.create_task(heartbeat())
 
                         try:
                             async for raw in ws:
+                                async with last_ack_lock:
+                                    last_ack = time.monotonic()
                                 msg = json.loads(raw)
                                 event = msg.get("event")
 

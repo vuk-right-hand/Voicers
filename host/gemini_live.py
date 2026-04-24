@@ -567,6 +567,7 @@ class GeminiLive:
         recovery (Cause I). We now `continue` and retry next cycle.
         """
         flush_count = 0
+        consecutive_failures = 0
         try:
             while self._active:
                 await asyncio.sleep(_FLUSH_INTERVAL_S)
@@ -585,15 +586,26 @@ class GeminiLive:
                     self._last_activity_start = time.monotonic()
                     flush_count += 1
                     self._flushes_total = flush_count
+                    consecutive_failures = 0
                     logger.info("Pipeline flush #%d complete (activityEnd→activityStart)", flush_count)
                 except Exception as exc:
+                    consecutive_failures += 1
                     logger.warning(
-                        "Pipeline flush #%d failed: %s — retrying next cycle",
-                        flush_count + 1, exc,
+                        "Pipeline flush #%d failed (%d consecutive): %s",
+                        flush_count + 1, consecutive_failures, exc,
                     )
-                    # Keep the loop alive — don't let one WS blip freeze flushing
-                    # forever. If the session is genuinely dead, _recv_loop will
-                    # exit and trigger _on_session_dead → restart().
+                    # If the send side is failing but _recv_loop is still blocked
+                    # on a half-open WS, no one else declares the session dead.
+                    # Escalate after 3 consecutive failures (~45s) — force a full
+                    # restart so we stop retrying a corpse.
+                    if consecutive_failures >= 3:
+                        logger.error(
+                            "Flush failed %d times in a row — declaring session dead, forcing restart",
+                            consecutive_failures,
+                        )
+                        if self._on_session_dead:
+                            self._on_session_dead()
+                        break
         except asyncio.CancelledError:
             pass
         logger.info("Flush loop ended after %d flushes", flush_count)

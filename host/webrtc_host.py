@@ -231,6 +231,12 @@ class WebRTCHost:
         # Subscription blocked flag (checked on start, rechecked on connect)
         self._subscription_blocked: bool = False
 
+        # Self-restart watchdog: exit after this many completed connections so
+        # Task Scheduler resurrects a clean process (prevents leaked aioice/TURN
+        # state from accumulating over a long uptime).
+        self._connection_count: int = 0
+        self._max_connections: int = 20
+
         # Cloudflare TURN credentials (refreshed every 12h)
         self._ice_servers_json: list | None = None
         self._turn_status: str = "none"
@@ -1013,6 +1019,15 @@ class WebRTCHost:
         elif state in ("failed", "closed"):
             # Covers abrupt ICE failure where DC on_close may never fire.
             await self._teardown_gemini()
+            self._connection_count = getattr(self, '_connection_count', 0) + 1
+            if self._connection_count >= getattr(self, '_max_connections', 20):
+                logger.info(
+                    "Reached %d completed connections — self-restarting for process hygiene "
+                    "(Task Scheduler will respawn within 60s)",
+                    self._connection_count,
+                )
+                import os
+                os._exit(0)
             await update_pc_status_async(self.session_id, "waiting")
             await write_signaling_async(self.session_id, {
                 "type": "host-ready",

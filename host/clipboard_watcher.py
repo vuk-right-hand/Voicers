@@ -36,6 +36,22 @@ WNDPROC = ctypes.WINFUNCTYPE(
     ctypes.wintypes.LPARAM,
 )
 
+# ctypes.wintypes.WNDCLASSW is absent in bundled/embedded Python distributions.
+# Define the struct directly so it works in both system and bundled Python.
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [
+        ("style",         ctypes.c_uint),
+        ("lpfnWndProc",   WNDPROC),
+        ("cbClsExtra",    ctypes.c_int),
+        ("cbWndExtra",    ctypes.c_int),
+        ("hInstance",     ctypes.wintypes.HANDLE),
+        ("hIcon",         ctypes.wintypes.HANDLE),
+        ("hCursor",       ctypes.wintypes.HANDLE),
+        ("hbrBackground", ctypes.wintypes.HANDLE),
+        ("lpszMenuName",  ctypes.c_wchar_p),
+        ("lpszClassName", ctypes.c_wchar_p),
+    ]
+
 
 class ClipboardWatcher:
     """Watches for clipboard changes via Win32 messages and fires a callback."""
@@ -76,7 +92,7 @@ class ClipboardWatcher:
 
     def _run(self):
         """Thread entry: create hidden window, register listener, pump messages."""
-        wc = ctypes.wintypes.WNDCLASSW()
+        wc = _WNDCLASSW()
         wc.lpfnWndProc = WNDPROC(self._wnd_proc)
         wc.hInstance = kernel32.GetModuleHandleW(None)
         wc.lpszClassName = "VoicerClipboardWatcher"

@@ -3,7 +3,7 @@
 ; Plan is read from voicer-activation.txt (line 2): free, byok, or pro
 
 #define MyAppName "Voicer"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Voicer"
 #define MyAppURL "https://voicers.vercel.app"
 
@@ -44,14 +44,21 @@ Name: "{group}\Start Voicer Host"; Filename: "{app}\start_voicer.bat"; WorkingDi
 Name: "{group}\Uninstall Voicer"; Filename: "{uninstallexe}"
 
 [Registry]
-; Auto-start on user logon via Registry Run key (no admin needed)
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "VoicerHost"; ValueData: "wscript.exe ""{app}\start_voicer.vbs"""; Flags: uninsdeletevalue
+; Delete any legacy Run-key entry from pre-1.0.1 installs — Task Scheduler owns
+; auto-start now. Leaving both in place causes the host to spawn twice on logon.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "VoicerHost"; Flags: deletevalue uninsdeletevalue
 
 [Run]
-; Start the host immediately after install
+; Register the Windows Scheduled Task that owns the host lifecycle: starts on
+; logon, restarts on failure every 1 min, up to 999 times. Runs hidden as the
+; current user with limited privileges; no admin needed.
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -WindowStyle Hidden -Command ""$a = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '\""{app}\start_voicer.vbs\""'; $tL = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; $tR = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1); $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited; Register-ScheduledTask -TaskName 'VoicerHost' -Action $a -Trigger @($tL, $tR) -Settings $s -Principal $p -Force | Out-Null"""; Flags: runhidden
+; Start the host immediately after install (first-time launch; task fires on next logon)
 Filename: "{app}\start_voicer.bat"; Description: "Start Voicer Host now"; Flags: nowait postinstall skipifsilent runminimized
 
 [UninstallRun]
+; Remove the scheduled task on uninstall
+Filename: "schtasks.exe"; Parameters: "/Delete /TN VoicerHost /F"; Flags: runhidden
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\host\__pycache__"
