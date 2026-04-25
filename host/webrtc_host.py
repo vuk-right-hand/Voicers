@@ -237,6 +237,13 @@ class WebRTCHost:
         self._connection_count: int = 0
         self._max_connections: int = 20
 
+        # Serialize offer handling so two concurrent offers can't race on
+        # self.pc / self._gemini_prewarm_task. When offers arrive faster than
+        # we process them (slow pc.close, network jitter), the second offer
+        # waits for the first to finish or time out instead of corrupting
+        # shared state mid-handshake.
+        self._offer_lock: asyncio.Lock = asyncio.Lock()
+
         # Cloudflare TURN credentials (refreshed every 12h)
         self._ice_servers_json: list | None = None
         self._turn_status: str = "none"
@@ -291,19 +298,40 @@ class WebRTCHost:
             loop.create_task(self._safe_handle_ice_candidate(data["candidate"]))
 
     async def _safe_handle_offer(self, sdp: str):
-        """Wrapper with error handling around _handle_offer."""
+        """Wrapper with error handling around _handle_offer.
+
+        Serialized via _offer_lock — concurrent offers (phone retries while
+        the host is still working on the previous one) wait their turn
+        instead of racing on shared state. _handle_offer also has a hard
+        timeout so a stuck pc.close() can't keep the lock forever.
+        """
+        failed = False
         try:
-            await self._handle_offer(sdp)
+            async with self._offer_lock:
+                await asyncio.wait_for(self._handle_offer(sdp), timeout=20.0)
+        except asyncio.TimeoutError:
+            failed = True
+            logger.error("SDP offer handling exceeded 20 s — abandoning, returning to host-ready")
+            # Drop the half-built PC so the next offer starts cleanly
+            if self.pc:
+                try:
+                    await asyncio.wait_for(self.pc.close(), timeout=2.0)
+                except Exception:
+                    pass
+                self.pc = None
         except Exception:
+            failed = True
             logger.exception("FAILED to handle SDP offer")
-            # Reset to host-ready so the phone can retry
-            if self.session_id:
+        if failed and self.session_id:
+            try:
                 await write_signaling_async(self.session_id, {
                     "type": "host-ready",
                     "host_id": USER_ID,
                     "ice_servers": self._ice_servers_json,
                     "turn_status": self._turn_status,
                 })
+            except Exception:
+                logger.exception("Failed to republish host-ready after offer error")
 
     async def _safe_handle_ice_candidate(self, candidate_str: str):
         """Wrapper with error handling around _handle_ice_candidate."""
@@ -340,9 +368,17 @@ class WebRTCHost:
             loop = asyncio.get_running_loop()
             self._gemini_prewarm_task = loop.create_task(self._prewarm_gemini())
 
-        # Clean up any previous connection
+        # Clean up any previous connection. aiortc's close() can hang in some
+        # cases (DTLS shutdown waiting for an ack from a phone that's already
+        # gone), so we don't wait forever — abandoning the old PC is safe
+        # because Python will GC it once we drop the reference.
         if self.pc:
-            await self.pc.close()
+            old_pc = self.pc
+            self.pc = None
+            try:
+                await asyncio.wait_for(old_pc.close(), timeout=3.0)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Previous pc.close() timed out or errored — abandoning it")
 
         rtc_config = _build_rtc_config(self._ice_servers_json)
         logger.info("ICE servers: %s", [s.urls for s in rtc_config.iceServers])
