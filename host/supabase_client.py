@@ -175,6 +175,14 @@ async def subscribe_signaling(session_id: str, callback: Callable[[dict], None])
         while True:
             try:
                 async for ws in websockets.connect(url):
+                    # Per-WS diagnostic counters. Logged on every close so we can
+                    # tell at a glance: was this a clean idle close, a server
+                    # error (1011), a network drop (1006), a Phoenix app-level
+                    # rejection (4xxx)? Was Supabase ever actually replying to
+                    # our heartbeats, or did the channel die silently?
+                    ws_open_ts = time.monotonic()
+                    msg_counts = {"phx_reply": 0, "postgres_changes": 0, "presence_state": 0, "presence_diff": 0, "other": 0}
+                    last_msg_ts = ws_open_ts
                     try:
                         # Join the realtime channel
                         join_msg = {
@@ -235,10 +243,15 @@ async def subscribe_signaling(session_id: str, callback: Callable[[dict], None])
 
                         try:
                             async for raw in ws:
+                                last_msg_ts = time.monotonic()
                                 async with last_ack_lock:
-                                    last_ack = time.monotonic()
+                                    last_ack = last_msg_ts
                                 msg = json.loads(raw)
                                 event = msg.get("event")
+                                if event in msg_counts:
+                                    msg_counts[event] += 1
+                                else:
+                                    msg_counts["other"] += 1
 
                                 if event == "postgres_changes":
                                     record = msg.get("payload", {}).get("data", {}).get("record", {})
@@ -249,8 +262,25 @@ async def subscribe_signaling(session_id: str, callback: Callable[[dict], None])
                         finally:
                             hb_task.cancel()
 
-                    except websockets.ConnectionClosed:
-                        logger.warning("Realtime connection closed, reconnecting...")
+                    except websockets.ConnectionClosed as cc:
+                        # Diagnostic: which side closed, with what code/reason, after how
+                        # long. WS close codes per RFC 6455 §7.4.1 + Phoenix 4xxx:
+                        #   1000 = normal closure                1001 = going away
+                        #   1006 = abnormal (no close frame)     1011 = server internal error
+                        #   1012 = service restart               4xxx = Phoenix app-level
+                        # If `rcvd` set: server initiated. If only `sent`: we initiated.
+                        rcvd = cc.rcvd
+                        sent = cc.sent
+                        side = "server" if rcvd else ("client" if sent else "unknown")
+                        code = (rcvd.code if rcvd else sent.code) if (rcvd or sent) else None
+                        reason = (rcvd.reason if rcvd else sent.reason) if (rcvd or sent) else ""
+                        duration = time.monotonic() - ws_open_ts
+                        time_since_msg = time.monotonic() - last_msg_ts
+                        logger.warning(
+                            "Realtime closed (side=%s code=%s reason=%r duration=%.1fs "
+                            "since_last_msg=%.1fs msgs=%s) — reconnecting",
+                            side, code, reason, duration, time_since_msg, msg_counts,
+                        )
                         continue
 
             except asyncio.CancelledError:
@@ -260,7 +290,10 @@ async def subscribe_signaling(session_id: str, callback: Callable[[dict], None])
             except Exception as exc:
                 # Network-level failure: WiFi drop, DNS error, laptop woke from sleep.
                 # Wait 5s then let the outer while-loop attempt a fresh connection.
-                logger.warning("Realtime network error (%s), retrying in 5s…", exc)
+                logger.warning(
+                    "Realtime network error (%s: %s), retrying in 5s…",
+                    type(exc).__name__, exc,
+                )
                 await asyncio.sleep(5)
 
     task = asyncio.create_task(_listen())
