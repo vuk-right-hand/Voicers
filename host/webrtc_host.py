@@ -404,10 +404,16 @@ class WebRTCHost:
             self.data_channel = channel
             self._setup_data_channel(channel)
 
-        # Handle connection state changes
-        @self.pc.on("connectionstatechange")
+        # Handle connection state changes. Capture THIS pc — the handler used
+        # to read self.pc at fire time, so a zombie pc's late event (consent
+        # expiry fires ~30s after the phone re-offered) read the NEW pc's
+        # state, and worse, its "failed"/"closed" tore down the new
+        # connection's Gemini session and republished host-ready mid-session.
+        this_pc = self.pc
+
+        @this_pc.on("connectionstatechange")
         async def on_connection_state():
-            await self._on_connection_state(self.pc.connectionState)
+            await self._on_connection_state(this_pc.connectionState, pc=this_pc)
 
         # Set remote description (the offer)
         offer = RTCSessionDescription(sdp=sdp, type="offer")
@@ -625,6 +631,14 @@ class WebRTCHost:
 
         @channel.on("close")
         def on_close():
+            # Stale-channel guard: during an auto-reconnect the phone re-offers
+            # while the previous connection is still dying. The OLD channel's
+            # close event lands AFTER the new connection's Gemini pre-warm has
+            # spawned — without this guard it tore down the new session (and
+            # stopped the clipboard watcher) the moment the user connected.
+            if channel is not self.data_channel:
+                logger.info("Stale data channel closed — ignoring")
+                return
             logger.info("Data channel closed")
             self._clipboard_watcher.stop()
             loop = asyncio.get_running_loop()
@@ -735,13 +749,21 @@ class WebRTCHost:
         _start_voice can proceed immediately on the first voice-tap.
         """
         prewarm_start_ts = time.monotonic()
+        # Capture the Event we intend to signal BEFORE teardown: when a live
+        # session exists (phone re-offered while connected — routine now with
+        # auto-reconnect), _teardown_gemini nulls self._gemini_ready, which
+        # used to orphan the waiter in _start_voice → guaranteed 8 s timeout
+        # → "Voice server unreachable" on the first tap of every reconnect.
+        ready_event = self._gemini_ready
+
         # Idempotency: if a stale session leaked (offer-arrives-twice,
         # ICE re-answer), tear it down first so we don't leak a GeminiLive.
         await self._teardown_gemini()
 
-        # Capture the Event we intend to signal. If teardown later nulls the
-        # instance attribute, we can still wake the original waiter.
-        ready_event = self._gemini_ready
+        # Restore the event handle teardown may have nulled — _start_voice
+        # re-reads self._gemini_ready and must find the one we will signal.
+        if ready_event is not None:
+            self._gemini_ready = ready_event
 
         host = self
 
@@ -1118,12 +1140,20 @@ class WebRTCHost:
         except Exception:
             logger.exception("host-ready republish on bye failed — heartbeat will heal")
 
-    async def _on_connection_state(self, state: str):
+    async def _on_connection_state(self, state: str, pc=None):
         """Handle PC connectionState transitions.
 
         Extracted from the inline @pc.on handler so unit tests can drive it
         directly without standing up a real RTCPeerConnection.
+
+        `pc` is the connection the event came from. Events from a pc that is
+        no longer self.pc are STALE (abandoned zombie from a previous offer —
+        its ICE consent expiry fires minutes later) and must not touch shared
+        state. pc=None (tests / direct calls) is treated as current.
         """
+        if pc is not None and pc is not self.pc:
+            logger.info("Stale pc event (%s) — ignoring", state)
+            return
         logger.info("Connection state: %s", state)
         if state == "connected":
             await update_pc_status_async(self.session_id, "connected")
