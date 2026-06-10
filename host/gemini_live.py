@@ -347,14 +347,25 @@ class GeminiLive:
                 # pre-warm; don't send a redundant end/start pair.
                 self._turn_active = True
             else:
-                if self._turn_active:
+                # Normalize transport failures (websockets ConnectionClosedError,
+                # genai APIError, ...) to RuntimeError — callers route that to
+                # a session restart. Raw ConnectionClosedError used to escape
+                # _start_voice's handler and kill voice until reconnect.
+                try:
+                    if self._turn_active:
+                        await self._session.send_realtime_input(
+                            activity_end=types.ActivityEnd()
+                        )
+                        self._turn_active = False
                     await self._session.send_realtime_input(
-                        activity_end=types.ActivityEnd()
+                        activity_start=types.ActivityStart()
                     )
-                    self._turn_active = False
-                await self._session.send_realtime_input(
-                    activity_start=types.ActivityStart()
-                )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"begin_turn activity cycle failed: {exc}"
+                    ) from exc
                 self._last_activity_start = time.monotonic()
                 self._turn_active = True
 
@@ -430,7 +441,33 @@ class GeminiLive:
 
         self.interim_buffer = saved_buffer
         try:
-            await self.start(_preserve_buffer=True)
+            # Up to 3 attempts. A stale resumption handle is the most common
+            # failure (server already dropped the old session's context, or the
+            # post-GoAway window expired) — clear it after a failed attempt and
+            # reconnect fresh: server-side context is lost but interim_buffer
+            # and queued audio survive, which is all dictation needs.
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                try:
+                    await self.start(_preserve_buffer=True)
+                    last_exc = None
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Gemini restart attempt %d/3 failed: %s", attempt + 1, exc,
+                    )
+                    if self._resumption_handle is not None:
+                        logger.info(
+                            "Clearing stale resumption handle — next attempt connects fresh"
+                        )
+                        self._resumption_handle = None
+                    if attempt < 2:
+                        await asyncio.sleep(1.0 * (attempt + 1))
+            if last_exc is not None:
+                raise last_exc
         finally:
             self._restarting = False
             self._restart_done_event.set()
@@ -693,9 +730,25 @@ class GeminiLive:
                         break
 
                     # ── GoAway: server is about to disconnect ──
+                    # The Live API closes every WebSocket after ~10 min and
+                    # warns ~50 s ahead via GoAway. Restart NOW (resumption
+                    # handle preserves server-side context, restart() preserves
+                    # interim_buffer + queued audio) instead of waiting for the
+                    # 1011 close — waiting used to leave a dead session that
+                    # only healed if a voice turn happened to be active.
                     if hasattr(response, 'go_away') and response.go_away is not None:
                         time_left = getattr(response.go_away, 'time_left', 'unknown')
-                        logger.warning("GoAway received — server disconnecting in %s, will restart", time_left)
+                        logger.warning(
+                            "GoAway received — server disconnecting in %s; "
+                            "restarting proactively", time_left,
+                        )
+                        if self._on_session_dead:
+                            self._on_session_dead()
+                            logger.info(
+                                "Recv loop ended (GoAway restart) — %d messages, %d turns",
+                                total_received, turns,
+                            )
+                            return
                         break
 
                     # ── Session resumption: save handle for reconnection ──
@@ -760,6 +813,8 @@ class GeminiLive:
             logger.error("Gemini recv error: %s", exc, exc_info=True)
 
         if self._active and self._on_session_dead:
-            logger.warning("Recv loop exited while voice active — triggering full session restart")
+            logger.warning(
+                "Recv loop exited while session active — triggering full session restart"
+            )
             self._on_session_dead()
         logger.info("Recv loop ended — %d messages received, %d turns total", total_received, turns)

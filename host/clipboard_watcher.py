@@ -53,6 +53,48 @@ class _WNDCLASSW(ctypes.Structure):
     ]
 
 
+# ── Process-lifetime window class ───────────────────────────────────────────
+# Win32 window classes live for the process lifetime and hold a raw pointer to
+# the WNDPROC thunk. Both must therefore be module-level singletons:
+#  - re-registering on every start() fails with ERROR_CLASS_ALREADY_EXISTS
+#    (which used to kill the watcher on every reconnect after the first), and
+#  - a per-run WNDPROC local gets GC'd when _run returns, leaving the class
+#    with a dangling function pointer for the next window it backs.
+
+_CLASS_NAME = "VoicerClipboardWatcher"
+_active_watcher: "ClipboardWatcher | None" = None
+
+
+def _static_wnd_proc(hwnd, msg, wparam, lparam):
+    watcher = _active_watcher
+    if msg == WM_CLIPBOARDUPDATE:
+        if watcher is not None:
+            watcher._on_clipboard_change()
+        return 0
+    if msg == WM_DESTROY:
+        return 0
+    return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+# Keep a module-level reference so the thunk the OS points at is never GC'd.
+_WND_PROC_THUNK = WNDPROC(_static_wnd_proc)
+_class_registered = False
+
+
+def _ensure_class_registered() -> bool:
+    global _class_registered
+    if _class_registered:
+        return True
+    wc = _WNDCLASSW()
+    wc.lpfnWndProc = _WND_PROC_THUNK
+    wc.hInstance = kernel32.GetModuleHandleW(None)
+    wc.lpszClassName = _CLASS_NAME
+    if not user32.RegisterClassW(ctypes.byref(wc)):
+        return False
+    _class_registered = True
+    return True
+
+
 class ClipboardWatcher:
     """Watches for clipboard changes via Win32 messages and fires a callback."""
 
@@ -92,20 +134,17 @@ class ClipboardWatcher:
 
     def _run(self):
         """Thread entry: create hidden window, register listener, pump messages."""
-        wc = _WNDCLASSW()
-        wc.lpfnWndProc = WNDPROC(self._wnd_proc)
-        wc.hInstance = kernel32.GetModuleHandleW(None)
-        wc.lpszClassName = "VoicerClipboardWatcher"
+        global _active_watcher
 
-        atom = user32.RegisterClassW(ctypes.byref(wc))
-        if not atom:
+        if not _ensure_class_registered():
             logger.error("Failed to register window class for clipboard watcher")
             return
 
+        _active_watcher = self
         self._hwnd = user32.CreateWindowExW(
-            0, wc.lpszClassName, "VoicerClipboard", 0,
+            0, _CLASS_NAME, "VoicerClipboard", 0,
             0, 0, 0, 0,
-            None, None, wc.hInstance, None,
+            None, None, kernel32.GetModuleHandleW(None), None,
         )
         if not self._hwnd:
             logger.error("Failed to create hidden window for clipboard watcher")
@@ -133,15 +172,9 @@ class ClipboardWatcher:
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.DestroyWindow(self._hwnd)
         self._hwnd = None
+        if _active_watcher is self:
+            _active_watcher = None
         logger.info("Clipboard watcher stopped")
-
-    def _wnd_proc(self, hwnd, msg, wparam, lparam):
-        if msg == WM_CLIPBOARDUPDATE:
-            self._on_clipboard_change()
-            return 0
-        if msg == WM_DESTROY:
-            return 0
-        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _on_clipboard_change(self):
         """Read clipboard and fire callback if text changed."""

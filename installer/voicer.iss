@@ -3,7 +3,7 @@
 ; Plan is read from voicer-activation.txt (line 2): free, byok, or pro
 
 #define MyAppName "Voicer"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "Voicer"
 #define MyAppURL "https://voicers.vercel.app"
 

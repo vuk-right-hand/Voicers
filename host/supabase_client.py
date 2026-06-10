@@ -118,24 +118,42 @@ def upsert_session(
     raise RuntimeError("Could not connect to Supabase after %d retries" % max_retries)
 
 
+def _patch_session_with_retry(session_id: str, payload: dict, what: str) -> None:
+    """PATCH the session row, retrying transient network failures.
+
+    These writes are load-bearing for reconnection: if the host-ready
+    republish after a bye/close is lost to a single ReadTimeout, the row
+    stays stale (pc_status=connected, signaling_data=answer) and the phone
+    dashboard shows "Desktop host is offline" until the host restarts.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = httpx.patch(
+                f"{REST_URL}/sessions?id=eq.{session_id}",
+                headers=_headers,
+                json=payload,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return
+        except (httpx.TimeoutException, httpx.TransportError, OSError) as exc:
+            last_exc = exc
+            logger.warning(
+                "%s write failed (attempt %d/3): %s — retrying", what, attempt + 1, exc,
+            )
+            time.sleep(1.0 * (attempt + 1))
+    raise last_exc  # type: ignore[misc]
+
+
 def write_signaling(session_id: str, data: dict) -> None:
     """Write signaling data (SDP answer or ICE candidate) to the session."""
-    resp = httpx.patch(
-        f"{REST_URL}/sessions?id=eq.{session_id}",
-        headers=_headers,
-        json={"signaling_data": data},
-    )
-    resp.raise_for_status()
+    _patch_session_with_retry(session_id, {"signaling_data": data}, "signaling")
 
 
 def update_pc_status(session_id: str, status: str) -> None:
     """Update pc_status field."""
-    resp = httpx.patch(
-        f"{REST_URL}/sessions?id=eq.{session_id}",
-        headers=_headers,
-        json={"pc_status": status},
-    )
-    resp.raise_for_status()
+    _patch_session_with_retry(session_id, {"pc_status": status}, "pc_status")
 
 
 # ── Async wrappers ─────────────────────────────────────────────────────────────

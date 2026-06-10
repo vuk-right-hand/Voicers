@@ -249,6 +249,10 @@ class WebRTCHost:
         self._turn_status: str = "none"
         self._turn_refresh_task: asyncio.Task | None = None
 
+        # host-ready heartbeat — self-heals stale session rows (missed
+        # republish after bye/close, host killed mid-handshake).
+        self._heartbeat_task: asyncio.Task | None = None
+
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
         try:
@@ -277,6 +281,9 @@ class WebRTCHost:
             self._turn_refresh_task = asyncio.create_task(
                 self._maintain_turn_credentials()
             )
+
+        # Self-healing host-ready heartbeat while no phone is connected.
+        self._heartbeat_task = asyncio.create_task(self._host_ready_heartbeat())
 
         screen_w, screen_h = get_screen_size()
         logger.info(
@@ -763,7 +770,12 @@ class WebRTCHost:
                     logger.exception("Failed to forward transcript")
 
         def on_session_dead():
-            if host._voice_active:
+            # Connection-lifetime session: restart whenever it exists, even
+            # with no voice turn active. The Live API sends GoAway every
+            # ~10 min regardless of taps — gating restart on _voice_active
+            # left idle deaths unhealed, so the next voice-tap hit a dead
+            # WebSocket and voice stayed broken until full reconnect.
+            if host._gemini is not None:
                 loop = asyncio.get_running_loop()
                 loop.create_task(host._restart_gemini(host.data_channel))
 
@@ -884,30 +896,54 @@ class WebRTCHost:
                 return
 
             # Passive stale-session detection. If the pre-warmed session died
-            # idly (GoAway without restart, network blip), begin_turn() raises
-            # and we trigger a restart before surfacing the error.
+            # (GoAway/network blip that somehow beat the proactive restart),
+            # begin_turn() raises — restart the session and retry ONCE so the
+            # user's tap still lands instead of being lost. Broad Exception:
+            # a dead WebSocket surfaces as websockets.ConnectionClosedError,
+            # which the old (RuntimeError, TimeoutError) clause missed,
+            # leaving _voice_active stuck True and voice dead until reconnect.
             try:
                 await asyncio.wait_for(self._gemini.begin_turn(), timeout=2.0)
-            except (RuntimeError, asyncio.TimeoutError) as exc:
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
                 logger.warning(
-                    "begin_turn failed (%s) — triggering restart", exc,
+                    "begin_turn failed (%s: %s) — restarting session and retrying",
+                    type(exc).__name__, exc,
                 )
-                # Fire-and-await restart; subsequent taps warm again.
                 try:
                     await self._restart_gemini(channel)
                 except Exception:
                     logger.exception("Restart after stale session failed")
-                # Surface the handshake error regardless — this tap is lost.
-                self._send_status(channel, {
-                    "type": "voice-status",
-                    "status": "error",
-                    "reason": "handshake",
-                    "detail": f"Stale session: {type(exc).__name__}",
-                })
-                self._voice_active = False
-                self._voice_mode = None
-                self._voice_start_ts = None
-                return
+                # _restart_gemini's failure path flips _voice_active off and
+                # notifies the PWA itself — nothing more to do here.
+                if not self._voice_active:
+                    self._voice_mode = None
+                    self._voice_start_ts = None
+                    return
+                retry_ok = False
+                if self._gemini is not None:
+                    try:
+                        # 5 s: begin_turn internally waits up to 3 s for an
+                        # in-flight restart (e.g. GoAway healing concurrently)
+                        # before cycling activity — give it headroom.
+                        await asyncio.wait_for(self._gemini.begin_turn(), timeout=5.0)
+                        retry_ok = True
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc2:
+                        logger.warning("begin_turn retry after restart failed: %s", exc2)
+                if not retry_ok:
+                    self._send_status(channel, {
+                        "type": "voice-status",
+                        "status": "error",
+                        "reason": "handshake",
+                        "detail": f"Stale session: {type(exc).__name__}",
+                    })
+                    self._voice_active = False
+                    self._voice_mode = None
+                    self._voice_start_ts = None
+                    return
         except asyncio.CancelledError:
             # _stop_voice cancelled us mid-pre-warm-wait (user double-tapped).
             logger.info("_start_voice cancelled — double-tap race")
@@ -915,6 +951,22 @@ class WebRTCHost:
             self._voice_mode = None
             self._voice_start_ts = None
             raise
+        except Exception as exc:
+            # Catch-all: _start_voice runs as a bare task — any escaped
+            # exception becomes "Task exception was never retrieved" with
+            # _voice_active stuck True (zombie turn, audio poured into a dead
+            # session). Reset state and tell the PWA instead.
+            logger.exception("_start_voice failed unexpectedly")
+            self._send_status(channel, {
+                "type": "voice-status",
+                "status": "error",
+                "reason": "unknown",
+                "detail": f"{type(exc).__name__}: {exc}",
+            })
+            self._voice_active = False
+            self._voice_mode = None
+            self._voice_start_ts = None
+            return
         finally:
             self._voice_starting_task = None
 
@@ -933,24 +985,41 @@ class WebRTCHost:
         )
 
     async def _restart_gemini(self, channel):
-        """Restart the Gemini session after a drop, preserving accumulated transcript."""
-        if not self._voice_active or not self._gemini or self._gemini_restarting:
+        """Restart the Gemini session after a drop, preserving accumulated transcript.
+
+        Runs for idle sessions too — the session is connection-lifetime, so a
+        GoAway landing between voice turns must still trigger a restart or the
+        next tap lands on a dead WebSocket.
+        """
+        if not self._gemini or self._gemini_restarting:
             return
         self._gemini_restarting = True
-        logger.warning("Gemini session died — restarting transparently")
+        logger.warning(
+            "Gemini session died — restarting transparently (voice_active=%s)",
+            self._voice_active,
+        )
         try:
             await self._gemini.restart()
         except Exception as exc:
-            logger.error("Failed to restart Gemini session: %s — voice is dead", exc)
-            # Don't leave a zombie — notify PWA that voice stopped
-            self._voice_active = False
-            self._voice_mode = None
-            if channel and channel.readyState == "open":
-                channel.send(json.dumps({"type": "voice-status", "status": "idle"}))
+            logger.error(
+                "Failed to restart Gemini session: %s — next voice-tap will retry", exc,
+            )
+            # Mid-turn failure: don't leave a zombie turn — surface the error
+            # so the PWA resets to idle with a friendly toast. Idle failure:
+            # stay quiet; begin_turn's restart-and-retry path heals on next tap.
+            if self._voice_active:
+                self._voice_active = False
+                self._voice_mode = None
+                self._send_status(channel, {
+                    "type": "voice-status",
+                    "status": "error",
+                    "reason": "handshake",
+                    "detail": f"Restart failed: {type(exc).__name__}",
+                })
             return
         finally:
             self._gemini_restarting = False
-        if channel and channel.readyState == "open":
+        if self._voice_active and channel and channel.readyState == "open":
             channel.send(json.dumps({"type": "voice-status", "status": "listening"}))
 
     async def _stop_voice(self, channel=None):
@@ -1031,13 +1100,23 @@ class WebRTCHost:
             except Exception:
                 logger.exception("Error closing PC on bye")
             self.pc = None
-        await update_pc_status_async(self.session_id, "waiting")
-        await write_signaling_async(self.session_id, {
-            "type": "host-ready",
-            "host_id": USER_ID,
-            "ice_servers": self._ice_servers_json,
-            "turn_status": self._turn_status,
-        })
+        # Each write is independently best-effort: a transient Supabase
+        # failure on pc_status must NOT skip the host-ready republish (seen
+        # live: ReadTimeout killed _on_bye mid-way and the dashboard showed
+        # "host offline" until restart). The heartbeat self-heals leftovers.
+        try:
+            await update_pc_status_async(self.session_id, "waiting")
+        except Exception:
+            logger.exception("pc_status update on bye failed — continuing to host-ready")
+        try:
+            await write_signaling_async(self.session_id, {
+                "type": "host-ready",
+                "host_id": USER_ID,
+                "ice_servers": self._ice_servers_json,
+                "turn_status": self._turn_status,
+            })
+        except Exception:
+            logger.exception("host-ready republish on bye failed — heartbeat will heal")
 
     async def _on_connection_state(self, state: str):
         """Handle PC connectionState transitions.
@@ -1059,18 +1138,27 @@ class WebRTCHost:
             if self._connection_count >= getattr(self, '_max_connections', 20):
                 logger.info(
                     "Reached %d completed connections — self-restarting for process hygiene "
-                    "(Task Scheduler will respawn within 60s)",
+                    "(Task Scheduler / launchd will respawn)",
                     self._connection_count,
                 )
-                import os
-                os._exit(0)
-            await update_pc_status_async(self.session_id, "waiting")
-            await write_signaling_async(self.session_id, {
-                "type": "host-ready",
-                "host_id": USER_ID,
-                "ice_servers": self._ice_servers_json,
-                "turn_status": self._turn_status,
-            })
+                # Exit code MUST be non-zero: macOS launchd is configured with
+                # KeepAlive.SuccessfulExit=false, which only resurrects
+                # non-zero exits. Windows Task Scheduler restarts regardless.
+                os._exit(1)
+            # Independent best-effort writes — see _on_bye for rationale.
+            try:
+                await update_pc_status_async(self.session_id, "waiting")
+            except Exception:
+                logger.exception("pc_status update on %s failed — continuing", state)
+            try:
+                await write_signaling_async(self.session_id, {
+                    "type": "host-ready",
+                    "host_id": USER_ID,
+                    "ice_servers": self._ice_servers_json,
+                    "turn_status": self._turn_status,
+                })
+            except Exception:
+                logger.exception("host-ready republish on %s failed — heartbeat will heal", state)
 
     async def _copy_selection(self, channel):
         """Fire Ctrl+C and wait for the clipboard to actually update before replying.
@@ -1112,6 +1200,42 @@ class WebRTCHost:
             }))
             await asyncio.sleep(0.05)  # 20 Hz
 
+    async def _host_ready_heartbeat(self):
+        """Republish host-ready every 30 s while no phone is connected.
+
+        Self-heals stale session rows. Without this, one lost republish
+        (Supabase ReadTimeout during _on_bye, host killed mid-handshake,
+        Realtime blip) leaves signaling_data='answer' + pc_status='connected'
+        forever, and the dashboard shows "Desktop host is offline" until the
+        host process restarts. With it, any stale state heals within 30 s.
+
+        Skipped while a handshake is in flight (_offer_lock held) or the PC is
+        live ('new'/'connecting'/'connected') so we never clobber signaling
+        mid-exchange.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(30)
+                if not self._running or not self.session_id:
+                    continue
+                if self._offer_lock.locked():
+                    continue
+                state = self.pc.connectionState if self.pc else None
+                if state in ("new", "connecting", "connected"):
+                    continue
+                await update_pc_status_async(self.session_id, "waiting")
+                await write_signaling_async(self.session_id, {
+                    "type": "host-ready",
+                    "host_id": USER_ID,
+                    "ice_servers": self._ice_servers_json,
+                    "turn_status": self._turn_status,
+                })
+                logger.debug("host-ready heartbeat republished")
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("host-ready heartbeat failed: %s — retrying in 30s", exc)
+
     async def _maintain_turn_credentials(self):
         """Refresh Cloudflare TURN credentials every 12 hours."""
         while self._running:
@@ -1138,6 +1262,8 @@ class WebRTCHost:
         self._clipboard_watcher.stop()
         if self._turn_refresh_task:
             self._turn_refresh_task.cancel()
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
         if self.pc:
             await self.pc.close()
         if self._channel:

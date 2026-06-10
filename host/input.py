@@ -59,15 +59,18 @@ async def get_clipboard_async() -> str:
 
 
 async def copy_selection_async(timeout_ms: int = 500) -> str:
-    """Send Ctrl+C and wait for the OS clipboard to actually update.
+    """Send the OS copy shortcut and wait for the clipboard to actually update.
 
     Snapshots clipboard, fires the hotkey, then polls until the content
     changes or the timeout expires. Eliminates the off-by-one race where
-    pyperclip.paste() runs before the foreground app has processed Ctrl+C.
+    pyperclip.paste() runs before the foreground app has processed the copy.
+
+    macOS: copy is Cmd+C everywhere (Ctrl+C would SIGINT a terminal!).
     """
+    copy_mod = "command" if sys.platform == "darwin" else "ctrl"
     async with _get_clipboard_lock():
         before = await asyncio.to_thread(pyperclip.paste)
-        await asyncio.to_thread(pyautogui.hotkey, "ctrl", "c")
+        await asyncio.to_thread(pyautogui.hotkey, copy_mod, "c")
         deadline = time.monotonic() + (timeout_ms / 1000)
         while time.monotonic() < deadline:
             await asyncio.sleep(0.02)
@@ -130,11 +133,27 @@ def scroll(delta: int) -> None:
     pyautogui.scroll(delta)
 
 
+# Phone-sent shortcuts use Windows conventions (ctrl+s, ctrl+a, ...). On
+# macOS those are Cmd-shortcuts — EXCEPT combos that are genuinely Ctrl on
+# Mac too: Ctrl+C (terminal SIGINT — the wheel's "Stop") and Ctrl+`
+# (VS Code terminal toggle).
+_MAC_KEEP_CTRL = {("ctrl", "c"), ("ctrl", "`")}
+
+
+def _map_keys_for_platform(keys: list[str]) -> list[str]:
+    if sys.platform != "darwin" or not keys:
+        return keys
+    combo = tuple(k.lower() for k in keys)
+    if combo in _MAC_KEEP_CTRL:
+        return keys
+    return ["command" if k.lower() == "ctrl" else k for k in keys]
+
+
 def execute_command(action: str, payload: dict) -> str | None:
     """Execute a system command based on action type."""
     if action == "shortcut":
         # payload: {"keys": ["ctrl", "c"]}
-        keys = payload.get("keys", [])
+        keys = _map_keys_for_platform(payload.get("keys", []))
         if keys:
             pyautogui.hotkey(*keys)
         return None
@@ -143,6 +162,7 @@ def execute_command(action: str, payload: dict) -> str | None:
         # payload: {"steps": [["ctrl", "a"], ["backspace"]]}
         steps = payload.get("steps", [])
         for step in steps:
+            step = _map_keys_for_platform(list(step))
             if len(step) == 1:
                 pyautogui.press(step[0])
             elif step:
