@@ -37,31 +37,51 @@ ask_ok() {
 }
 
 # ── Step 1: Find activation file ────────────────────────────────────────────
-ACTIVATION_FILE=""
+# The download zip contains the DMG + voicer-activation.txt side by side.
+# Safari / Archive Utility auto-extract that zip into a SUBFOLDER of
+# ~/Downloads, so one level of nesting MUST be searched too — a flat glob
+# alone misses the default-Safari flow entirely. Newest match wins (handles
+# browser renames like "voicer-activation (1).txt").
+find_activation() {
+    ls -t \
+        ~/Downloads/voicer-activation*.txt \
+        ~/Downloads/*/voicer-activation*.txt \
+        ~/Desktop/voicer-activation*.txt \
+        ~/Desktop/*/voicer-activation*.txt \
+        2>/dev/null | head -n 1
+}
 
-# Search Downloads for most recent match (handles browser renames like "(1)")
-FOUND=$(ls -t ~/Downloads/voicer-activation*.txt 2>/dev/null | head -n 1)
-if [ -n "$FOUND" ]; then
-    ACTIVATION_FILE="$FOUND"
-else
-    # Show file picker — POSIX path to avoid HFS colon-separated paths
-    PICKED=$(osascript -e 'POSIX path of (choose file with prompt "Select your voicer-activation.txt file" of type {"txt"})' 2>/dev/null) || true
-    if [ -n "$PICKED" ]; then
-        ACTIVATION_FILE="$PICKED"
+ACTIVATION_FILE="$(find_activation)"
+
+# Guided retry loop — setup must never dead-end. The user stays here until
+# the file is found, picked manually, or they explicitly quit. (The old flow
+# exited with "download it from the site" and made them start over.)
+while [ -z "$ACTIVATION_FILE" ] || [ ! -f "$ACTIVATION_FILE" ]; do
+    CHOICE=$(osascript -e 'button returned of (display dialog "Voicer needs the activation file that came with your download.\n\nIt is inside the zip you downloaded (VoicerInstaller-macOS.zip), next to the installer. Unzip it if you have not already, then click Try Again." with title "Voicer Setup" buttons {"Quit", "Choose File...", "Try Again"} default button "Try Again")' 2>/dev/null) || CHOICE="Quit"
+
+    if [ "$CHOICE" == "Try Again" ]; then
+        ACTIVATION_FILE="$(find_activation)"
+    elif [ "$CHOICE" == "Choose File..." ]; then
+        # POSIX path to avoid HFS colon-separated paths
+        PICKED=$(osascript -e 'POSIX path of (choose file with prompt "Select your voicer-activation.txt file" of type {"txt"})' 2>/dev/null) || true
+        if [ -n "$PICKED" ]; then
+            ACTIVATION_FILE="$PICKED"
+        fi
+    else
+        osascript -e 'display alert "Setup Cancelled" message "Open Voicer again any time to finish setup." as informational' 2>/dev/null
+        exit 1
     fi
-fi
-
-if [ -z "$ACTIVATION_FILE" ] || [ ! -f "$ACTIVATION_FILE" ]; then
-    osascript -e 'display alert "Setup Cancelled" message "Could not find voicer-activation.txt. Download it from voicers.vercel.app after purchase." as critical'
-    exit 1
-fi
+done
 
 # Read activation data
 USER_ID=$(sed -n '1p' "$ACTIVATION_FILE" | tr -d '[:space:]')
 PLAN=$(sed -n '2p' "$ACTIVATION_FILE" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
 
-if [ -z "$USER_ID" ]; then
-    osascript -e 'display alert "Invalid Activation File" message "USER_ID not found in activation file." as critical'
+if ! [[ "$USER_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    # Not a UUID — corrupted/edited file. A bad USER_ID makes every Supabase
+    # query 400 and the host crash-loops on boot (seen once with a test-value
+    # leak on Windows). Refuse it here, where the user can still fix it.
+    osascript -e 'display alert "Invalid Activation File" message "This activation file looks damaged. Re-download your installer from the link in your email and try again." as critical'
     exit 1
 fi
 

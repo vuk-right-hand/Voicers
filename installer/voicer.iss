@@ -111,6 +111,42 @@ begin
   end;
 end;
 
+function LooksLikeUuid(const S: string): Boolean;
+begin
+  Result := (Length(S) = 36) and (S[9] = '-') and (S[14] = '-')
+    and (S[19] = '-') and (S[24] = '-');
+end;
+
+function InitializeSetup(): Boolean;
+var
+  ExistingEnv: string;
+  ActivationUserId: string;
+begin
+  Result := True;
+
+  // Upgrade path: an existing install keeps its .env (USER_ID preserved),
+  // so the activation file is optional.
+  ExistingEnv := ExpandConstant('{autopf}\{#MyAppName}\host\.env');
+  if FileExists(ExistingEnv) then
+    exit;
+
+  // Fresh install: the activation file is MANDATORY. Without this gate,
+  // running the exe straight from inside the zip preview (Explorer extracts
+  // only the exe to a temp dir, leaving voicer-activation.txt behind) wrote
+  // an empty USER_ID and produced a host that silently never works.
+  ActivationUserId := ReadActivationFile;
+  if not LooksLikeUuid(ActivationUserId) then
+  begin
+    MsgBox(
+      'Voicer Setup could not find your activation file.' + #13#10 + #13#10 +
+      'Please unzip the download first (VoicerInstaller.zip contains BOTH ' +
+      'VoicerSetup.exe and voicer-activation.txt), keep the two files in ' +
+      'the same folder, and run VoicerSetup.exe from there.',
+      mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
 procedure InitializeWizard;
 begin
   // Read plan from activation file (line 2)
