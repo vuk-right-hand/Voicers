@@ -73,7 +73,16 @@ export default function DashboardPage() {
       const raw = data.signaling_data;
       const sig: SignalingData | null =
         typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as SignalingData | null);
-      return sig?.type === "host-ready" || data.pc_status === "waiting";
+      // pc_status === "connected" counts as ready: after the phone is swiped
+      // away or killed, the host can take ~30s (ICE consent expiry) to notice
+      // and republish. The host answers fresh offers at any time — a new
+      // offer instantly evicts the zombie connection — so blocking the
+      // Connect button on a stale row only stops the user from reconnecting.
+      return (
+        sig?.type === "host-ready" ||
+        data.pc_status === "waiting" ||
+        data.pc_status === "connected"
+      );
     }
 
     async function load() {
@@ -89,7 +98,7 @@ export default function DashboardPage() {
             data.id,
             (sigData) => setHostReady(sigData.type === "host-ready"),
             (status) => {
-              if (status === "waiting") setHostReady(true);
+              if (status === "waiting" || status === "connected") setHostReady(true);
               else if (status === "offline") setHostReady(false);
             },
           );
@@ -124,7 +133,7 @@ export default function DashboardPage() {
           data.id,
           (sigData) => setHostReady(sigData.type === "host-ready"),
           (status) => {
-            if (status === "waiting") setHostReady(true);
+            if (status === "waiting" || status === "connected") setHostReady(true);
             else if (status === "offline") setHostReady(false);
           },
         );
@@ -167,7 +176,9 @@ export default function DashboardPage() {
     if (!session) return;
     const sig = session.signaling_data as SignalingData | null;
     const iceServers = sig?.type === "host-ready" ? sig.ice_servers : undefined;
-    connectToHost(session.id, iceServers);
+    // userId rides along so the store can re-fetch the active session row
+    // during auto-reconnects (host restarts create a new row).
+    connectToHost(session.id, iceServers, userId ?? undefined);
     router.push("/session");
   };
 

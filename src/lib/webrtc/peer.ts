@@ -144,6 +144,15 @@ export function initiateCall(
     pc,
     close: () => {
       channel?.unsubscribe();
+      // Detach handlers BEFORE closing: during an auto-reconnect re-dial the
+      // old pc fires "closed" (and the old data channel fires onclose) after
+      // the new connection is already being set up — without detaching, those
+      // stale events clobber the fresh pc/dataChannel in the session store.
+      pc.onconnectionstatechange = null;
+      pc.ontrack = null;
+      dataChannel.onopen = null;
+      dataChannel.onmessage = null;
+      dataChannel.onclose = null;
       dataChannel.close();
       pc.close();
     },

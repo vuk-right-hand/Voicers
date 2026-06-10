@@ -20,6 +20,7 @@ export default function SessionPage() {
     dataChannel,
     sendCommand,
     disconnect,
+    reconnect,
     togglePocketMode,
     setIsPocketMode,
     screenWidth,
@@ -425,8 +426,30 @@ export default function SessionPage() {
 
       {/* ── Connection status overlay ──────────────────────────────────────── */}
       {statusLabel && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-6 bg-black/70">
           <p className="text-lg text-white">{statusLabel}</p>
+          {transportStatus === "failed" && (
+            <div className="flex flex-col items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  // Manual retry resets the auto-reconnect budget
+                  useSessionStore.setState({ reconnectAttempt: 0 });
+                  void reconnect();
+                }}
+                className="rounded-2xl bg-white px-8 py-3 text-base font-semibold text-black transition-transform active:scale-95"
+              >
+                Reconnect
+              </button>
+              <button
+                type="button"
+                onClick={handleDisconnect}
+                className="text-sm text-zinc-500 underline-offset-2 active:text-zinc-300"
+              >
+                Back to dashboard
+              </button>
+            </div>
+          )}
         </div>
       )}
 
