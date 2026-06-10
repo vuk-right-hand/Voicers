@@ -6,8 +6,13 @@ import {
   SNIPER_ZOOM_HOLD_MS,
   SNIPER_ZOOM_LEVEL,
   SNIPER_ZOOM_LEVEL_2,
+  SNIPER_ZOOM_LEVEL_3,
+  SNIPER_ZOOM_MAX,
   HOLD_SLOP_RADIUS,
   SCROLL_STRIP_SENSITIVITY,
+  TWO_FINGER_SCROLL_SENSITIVITY,
+  PINCH_CLASSIFY_DIST_PX,
+  TWO_FINGER_SCROLL_CLASSIFY_PX,
   EDGE_MOMENTUM_ZONE,
   EDGE_MOMENTUM_SPEED,
   TRACKPAD_MOVE_SENSITIVITY,
@@ -78,6 +83,13 @@ export function useGestures(
   const pinchStartDist = useRef(0);
   const pinchStartZoom = useRef(1.0);
   const pinchStartTime = useRef(0);
+
+  // 2-finger gesture classification: a 2-finger touch starts "undecided" and
+  // becomes "pinch" (inter-finger distance changes) or "scroll" (both fingers
+  // travel together). Once classified, it sticks until all fingers lift.
+  const twoFingerMode = useRef<"undecided" | "pinch" | "scroll">("undecided");
+  const twoFingerStart = useRef({ x: 0, y: 0 });
+  const twoFingerLastY = useRef(0);
 
   // Strip scroll
   const stripScrollLastY = useRef(0);
@@ -165,6 +177,15 @@ export function useGestures(
     const dy = t1.clientY - t2.clientY;
     return Math.sqrt(dx * dx + dy * dy);
   };
+
+  /** Reset the pinch/scroll classifier at the start of any 2-finger gesture. */
+  const beginTwoFingerTracking = useCallback((touches: React.TouchList) => {
+    twoFingerMode.current = "undecided";
+    const cx = (touches[0].clientX + touches[1].clientX) / 2;
+    const cy = (touches[0].clientY + touches[1].clientY) / 2;
+    twoFingerStart.current = { x: cx, y: cy };
+    twoFingerLastY.current = cy;
+  }, []);
 
   const stopEdgeMomentum = useCallback(() => {
     if (edgeMomentum.current.animId !== null) {
@@ -295,19 +316,24 @@ export function useGestures(
         isInitialHoldTouch.current = false;
 
         clearHoldTimer();
-        if (currentZoomLevel.current < SNIPER_ZOOM_LEVEL_2) {
-          // Not at max zoom yet → hold for progressive zoom (2x → 3x)
+        if (currentZoomLevel.current < SNIPER_ZOOM_MAX) {
+          // Not at max zoom yet → hold steps up the ladder (2x → 3x → 4x).
+          // Pinched-to-between levels snap to the next rung above.
+          const nextLevel =
+            currentZoomLevel.current < SNIPER_ZOOM_LEVEL_2
+              ? SNIPER_ZOOM_LEVEL_2
+              : SNIPER_ZOOM_LEVEL_3;
           holdTimer.current = setTimeout(() => {
-            currentZoomLevel.current = SNIPER_ZOOM_LEVEL_2;
+            currentZoomLevel.current = nextLevel;
             setZoomStyle((prev) => ({
               ...prev,
-              transform: `scale(${SNIPER_ZOOM_LEVEL_2})`,
+              transform: `scale(${nextLevel})`,
               transition: "transform 0.15s ease-out",
             }));
-            setZoomPercent(Math.round(SNIPER_ZOOM_LEVEL_2 * 100));
+            setZoomPercent(Math.round(nextLevel * 100));
           }, SNIPER_ZOOM_HOLD_MS);
         } else {
-          // At max zoom (300%) → hold to start highlighting
+          // At max zoom (400%) → hold to start highlighting
           holdTimer.current = setTimeout(() => {
             const coords = getNormalizedCoords(startPos.current.x, startPos.current.y);
             if (coords) {
@@ -363,16 +389,26 @@ export function useGestures(
     [clearHighlightSafety, clearHoldTimer, getNormalizedCoords, sendCommand, setState, videoRef],
   );
 
-  /** Handle 2+ finger touchStart for pinch (voice-mode style) */
+  /** Handle 2+ finger touchStart for pinch / 2-finger scroll (voice-mode style) */
   const voiceTouchStartPinch = useCallback(
     (touches: React.TouchList) => {
       const state = stateRef.current;
+
+      if (state === "pinching") {
+        // A finger lifted and came back mid-gesture — re-baseline distance,
+        // zoom and centroid so the jump doesn't fire a phantom zoom/scroll.
+        pinchStartDist.current = getTouchDist(touches[0], touches[1]);
+        pinchStartZoom.current = currentZoomLevel.current;
+        beginTwoFingerTracking(touches);
+        return;
+      }
 
       if (state === "zoomed") {
         clearHoldTimer();
         pinchStartDist.current = getTouchDist(touches[0], touches[1]);
         pinchStartZoom.current = currentZoomLevel.current;
         pinchStartTime.current = Date.now();
+        beginTwoFingerTracking(touches);
         setState("pinching");
         return;
       }
@@ -385,6 +421,7 @@ export function useGestures(
         pinchStartDist.current = getTouchDist(touches[0], touches[1]);
         pinchStartZoom.current = currentZoomLevel.current;
         pinchStartTime.current = Date.now();
+        beginTwoFingerTracking(touches);
         setState("pinching");
         return;
       }
@@ -414,10 +451,11 @@ export function useGestures(
         pinchStartDist.current = getTouchDist(touches[0], touches[1]);
         pinchStartZoom.current = currentZoomLevel.current > 1 ? currentZoomLevel.current : 1.0;
         pinchStartTime.current = Date.now();
+        beginTwoFingerTracking(touches);
         setState("pinching");
       }
     },
-    [clearHoldTimer, sendCommand, setState, videoRef],
+    [beginTwoFingerTracking, clearHighlightSafety, clearHoldTimer, sendCommand, setState, videoRef],
   );
 
   // ─── Touch handlers ─────────────────────────────────────────────────────────
@@ -455,6 +493,7 @@ export function useGestures(
           pinchStartDist.current = getTouchDist(touches[0], touches[1]);
           pinchStartZoom.current = currentZoomLevel.current > 1 ? currentZoomLevel.current : 1.0;
           pinchStartTime.current = Date.now();
+          beginTwoFingerTracking(touches);
           setState("pinching");
           return;
         }
@@ -554,12 +593,46 @@ export function useGestures(
         return;
       }
 
-      // ── Pinch zoom (both modes) ───────────────────────────────
+      // ── 2-finger gestures: pinch zoom OR 2-finger scroll (both modes) ──
       if (state === "pinching" && touches.length >= 2) {
         const newDist = getTouchDist(touches[0], touches[1]);
+        const centroidX = (touches[0].clientX + touches[1].clientX) / 2;
+        const centroidY = (touches[0].clientY + touches[1].clientY) / 2;
+
+        // Classify once per gesture: distance change ⇒ pinch, parallel
+        // travel ⇒ scroll. Whichever signal dominates first wins; until
+        // then the gesture is inert (no zoom snap, no phantom scroll).
+        if (twoFingerMode.current === "undecided") {
+          const distDelta = Math.abs(newDist - pinchStartDist.current);
+          const travel = Math.hypot(
+            centroidX - twoFingerStart.current.x,
+            centroidY - twoFingerStart.current.y,
+          );
+          if (distDelta > PINCH_CLASSIFY_DIST_PX && distDelta > travel) {
+            twoFingerMode.current = "pinch";
+          } else if (travel > TWO_FINGER_SCROLL_CLASSIFY_PX && travel > distDelta) {
+            twoFingerMode.current = "scroll";
+            twoFingerLastY.current = centroidY;
+          } else {
+            return; // not enough signal yet
+          }
+        }
+
+        // 2-finger drag → scroll the PC window (same convention as the
+        // scroll strip: drag down = scroll down). Zoom level is untouched.
+        if (twoFingerMode.current === "scroll") {
+          const deltaY = twoFingerLastY.current - centroidY;
+          twoFingerLastY.current = centroidY;
+          const scrollAmount = Math.round(deltaY * TWO_FINGER_SCROLL_SENSITIVITY);
+          if (scrollAmount !== 0) {
+            sendCommand({ type: "scroll", delta: scrollAmount });
+          }
+          return;
+        }
+
         const ratio = newDist / pinchStartDist.current;
-        // Pinch in OR out, capped at SNIPER_ZOOM_LEVEL_2, floor at 1.0
-        const newZoom = Math.max(1.0, Math.min(SNIPER_ZOOM_LEVEL_2, pinchStartZoom.current * ratio));
+        // Pinch in OR out, capped at SNIPER_ZOOM_MAX (400%), floor at 1.0
+        const newZoom = Math.max(1.0, Math.min(SNIPER_ZOOM_MAX, pinchStartZoom.current * ratio));
         currentZoomLevel.current = newZoom;
         if (newZoom <= 1.0) {
           // Only hard-reset if we started from a zoomed state (intentional pinch-in to unzoom).
@@ -725,11 +798,12 @@ export function useGestures(
         return;
       }
 
-      // ── Pinch end (both modes) ────────────────────────────────
+      // ── 2-finger gesture end (both modes) ─────────────────────
       if (state === "pinching") {
         // Wait until ALL fingers lift — if one lifts early and we transition to "zoomed",
         // the remaining finger triggers the pan handler with a stale lastPanPos → snaps view.
         if (remainingTouches > 0) return;
+        twoFingerMode.current = "undecided";
         if (currentZoomLevel.current <= 1.0) {
           resetZoom();
         } else if (mode === "voice" || !touchInTrackpad.current) {
@@ -855,6 +929,7 @@ export function useGestures(
     clearHighlightSafety();
     stopEdgeMomentum();
     scrollStartedInZone.current = false;
+    twoFingerMode.current = "undecided";
     if (stateRef.current === "tp-highlighting" || stateRef.current === "zoomed-highlighting") {
       sendCommand({ type: "mouseup" });
     }

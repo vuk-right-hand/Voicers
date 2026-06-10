@@ -11,9 +11,12 @@ export const PLANS = {
 /** Hold duration (ms) to trigger sniper zoom */
 export const SNIPER_ZOOM_HOLD_MS = 200;
 
-/** Sniper zoom magnification levels */
+/** Sniper zoom magnification levels — hold ladders 200% → 300% → 400% */
 export const SNIPER_ZOOM_LEVEL = 2.0;
 export const SNIPER_ZOOM_LEVEL_2 = 3.0;
+export const SNIPER_ZOOM_LEVEL_3 = 4.0;
+/** Hard ceiling for pinch + hold ladder */
+export const SNIPER_ZOOM_MAX = SNIPER_ZOOM_LEVEL_3;
 
 /** Movement threshold (px) to cancel hold timer — distinguishes hold from drag */
 export const HOLD_SLOP_RADIUS = 10;
@@ -61,6 +64,19 @@ export const SCROLL_STRIP_HEIGHT = 0.20;
 /** Drag-px → scroll-delta multiplier for the scroll strip.
  *  pyautogui.scroll(1) = one mouse-wheel click. 1.2 → ~120 clicks per 100px drag. */
 export const SCROLL_STRIP_SENSITIVITY = 1.8;
+
+// ─── 2-Finger Scroll (full-screen, voice + trackpad modes) ──────────────────
+
+/** Drag-px → scroll-delta multiplier for 2-finger drag scrolling.
+ *  Slightly gentler than the strip — full-screen drags travel further. */
+export const TWO_FINGER_SCROLL_SENSITIVITY = 1.2;
+
+/** Inter-finger distance change (px) that classifies a 2-finger gesture as a
+ *  pinch. Until one classifier wins, the gesture does nothing. */
+export const PINCH_CLASSIFY_DIST_PX = 22;
+
+/** Centroid travel (px) that classifies a 2-finger gesture as a scroll. */
+export const TWO_FINGER_SCROLL_CLASSIFY_PX = 14;
 
 /** Trackpad height as fraction of screen in portrait (bottom 25%) */
 export const TRACKPAD_HEIGHT_RATIO = 0.25;
