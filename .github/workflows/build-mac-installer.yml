@@ -7,6 +7,11 @@ on:
 jobs:
   build-dmg:
     runs-on: macos-14  # Apple Silicon (M1) — matches our arm64 build
+    env:
+      # upload-artifact@v5 still resolves to a Node 20 runtime on this runner
+      # image; GitHub force-switches Node 20 actions to Node 24 on 2026-06-16.
+      # Opt in now so the switch happens on our terms, not mid-release.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout repo
         # v5 (Node 24): GitHub force-switches Node 20 actions to Node 24 on
