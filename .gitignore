@@ -45,6 +45,11 @@ installer/bundle/
 installer/Output/
 installer/*.zip
 installer/get-pip.py
+installer-mac/Output/
+installer-mac/bundle/
+installer-mac/*.dmg
+installer-mac/*.tar.gz
+installer-mac/Voicer.app/
 
 # Python
 __pycache__/

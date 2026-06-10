@@ -9,7 +9,9 @@ jobs:
     runs-on: macos-14  # Apple Silicon (M1) — matches our arm64 build
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        # v5 (Node 24): GitHub force-switches Node 20 actions to Node 24 on
+        # 2026-06-16 and removes Node 20 runners 2026-09-16.
+        uses: actions/checkout@v5
 
       - name: Create host/.env from secrets
         env:
@@ -28,7 +30,7 @@ jobs:
         run: bash build.sh
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: VoicerInstaller-macOS
           path: installer-mac/VoicerInstaller.dmg
