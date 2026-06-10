@@ -176,6 +176,9 @@ export default function DashboardPage() {
     if (!session) return;
     const sig = session.signaling_data as SignalingData | null;
     const iceServers = sig?.type === "host-ready" ? sig.ice_servers : undefined;
+    // Manual tap = fresh user intent: reset the auto-reconnect budget so a
+    // previously exhausted session can't instantly re-fail.
+    useSessionStore.setState({ reconnectAttempt: 0 });
     // userId rides along so the store can re-fetch the active session row
     // during auto-reconnects (host restarts create a new row).
     connectToHost(session.id, iceServers, userId ?? undefined);

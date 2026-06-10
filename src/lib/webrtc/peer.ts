@@ -20,6 +20,12 @@ export interface PeerConnection {
   close: () => void;
 }
 
+// Monotonic counter so every call gets a UNIQUE Realtime channel name.
+// Reusing one name ("session-{id}-peer") across rapid close/resubscribe
+// cycles (auto-reconnect re-dials) lets the old channel's cleanup kill the
+// new subscription — the answer never arrives and signaling hangs.
+let _peerChannelSeq = 0;
+
 /**
  * Initiate a WebRTC call to the host.
  * Phone is the caller — creates offer + data channel.
@@ -98,7 +104,7 @@ export function initiateCall(
         iceQueue.push(candidate);
       }
     }
-  }, undefined, "peer");
+  }, undefined, `peer-${++_peerChannelSeq}`);
 
   // 7. Create offer, wait for ALL ICE candidates, then send to host.
   //    Chrome gathers candidates asynchronously (trickle ICE). Sending them

@@ -39,6 +39,12 @@ interface SessionState {
   userId: string | null;
   /** Consecutive auto-reconnect attempts since last success/user trigger */
   reconnectAttempt: number;
+  /** Last known ICE servers (Cloudflare TURN). Kept so re-dials never
+   *  downgrade to STUN-only: mid-handshake the session row holds the
+   *  offer/answer instead of host-ready, so the TURN credentials aren't
+   *  re-readable from it. CF credentials are minted with ttl=86400 —
+   *  reusing them for the lifetime of the app session is safe. */
+  iceServers: RTCIceServer[] | null;
 
   // Actions
   connectToHost: (sessionId: string, iceServers?: RTCIceServer[], userId?: string) => Promise<void>;
@@ -147,6 +153,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessionId: null,
   userId: null,
   reconnectAttempt: 0,
+  iceServers: null,
 
   connectToHost: async (sessionId, iceServers, userId) => {
     // Clean up any existing connection
@@ -160,12 +167,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       mediaStream: null,
       dataChannel: null,
       ...(userId ? { userId } : {}),
+      // Remember working TURN credentials; never overwrite them with nothing.
+      ...(iceServers && iceServers.length ? { iceServers } : {}),
     });
 
     // Indicator-free audio pre-warm. Runs inside the user-gesture stack so
     // iOS Safari allows audioWorklet.addModule. Fire-and-forget: failures
     // fall back to cold-start inside startListening().
     void prewarmAudio();
+
+    // Effective ICE servers: fresh ones if the caller had them, otherwise the
+    // last known set. Passing undefined here means STUN-only — on networks
+    // that need the TURN relay, ICE would hang in "connecting" forever.
+    const effectiveIceServers =
+      (iceServers && iceServers.length ? iceServers : get().iceServers) ?? undefined;
 
     const { pc, close } = initiateCall(
       sessionId,
@@ -275,7 +290,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         }
       },
-      iceServers,
+      effectiveIceServers,
       // onRejected — host rejected connection (subscription expired)
       () => {
         _close = null;
@@ -290,12 +305,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // new session row, its Realtime sub was dead, the row write was lost),
     // re-fetch the session and re-dial. Cleared as soon as ICE starts
     // ("connecting") or the connection lands.
+    //
+    // 30 s, NOT lower: legitimate signaling takes 15-20 s on real networks —
+    // the phone waits up to 10 s for ICE gathering (TURN allocation) before
+    // it even writes the offer, then the host needs several seconds to
+    // answer. A 12 s watchdog fired mid-handshake on EVERY connect and the
+    // re-dial killed its own predecessor in an endless storm.
     _offerWatchdog = setTimeout(() => {
       _offerWatchdog = null;
       if (!_userDisconnected && get().transportStatus === "signaling") {
         void get().reconnect();
       }
-    }, 12_000);
+    }, 30_000);
 
     _close = () => {
       close();
