@@ -20,7 +20,13 @@ from pydantic import BaseModel, Field
 from input import tap, type_text, scroll, execute_command
 from webrtc_host import start_host, stop_host
 
-logging.basicConfig(level=logging.INFO)
+# Timestamps are mandatory — without them field reports ("STT stopped after
+# 10-15 s") can't be told apart from normal pauses in voicer.log.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03d %(levelname)s:%(name)s:%(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 @asynccontextmanager

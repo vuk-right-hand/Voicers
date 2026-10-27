@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useRef } from "react";
 import { create } from "zustand";
 import { VOICE_CHUNK_INTERVAL_MS } from "@/lib/constants";
-import { WORKLET_CODE, friendlyMessageFor } from "@/hooks/voice-worklet";
+import {
+  WORKLET_CODE,
+  friendlyMessageFor,
+  MicSilenceTracker,
+  peakAbsInt16,
+} from "@/hooks/voice-worklet";
 
 // Re-exports so the existing use-session.ts import
 // (`import { friendlyMessageFor } from "@/hooks/use-voice"`) keeps working.
@@ -238,6 +243,47 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
   // leave tap #2 shipping audio over a dead channel.
   const dataChannelRef = useRef<RTCDataChannel | null>(dataChannel);
   dataChannelRef.current = dataChannel;
+  // Mic health diagnostics — reset per voice-tap, reported to the host log.
+  const silenceRef = useRef(new MicSilenceTracker());
+  const listenStartRef = useRef(0);
+
+  // Send a mic-state snapshot to the host log (grep "VOICE-DIAG phone").
+  const sendMicDiag = useCallback((event: string, extra?: Record<string, unknown>) => {
+    const dc = dataChannelRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    const track = streamRef.current?.getAudioTracks()[0];
+    const ctx = getSttAudioCtx() ?? coldAudioCtxRef.current;
+    const s = track?.getSettings?.() ?? {};
+    const state = {
+      ...extra,
+      sinceTapMs: Math.round(performance.now() - listenStartRef.current),
+      ctxState: ctx?.state,
+      ctxRate: ctx?.sampleRate,
+      trackState: track?.readyState,
+      trackMuted: track?.muted,
+      trackEnabled: track?.enabled,
+      ec: s.echoCancellation,
+      ns: s.noiseSuppression,
+      agc: s.autoGainControl,
+      micRate: s.sampleRate,
+      visibility: typeof document !== "undefined" ? document.visibilityState : undefined,
+    };
+    try { dc.send(JSON.stringify({ type: "mic-diag", event, state })); } catch { /* ignore */ }
+  }, []);
+
+  // Single worklet → DC path for every graph build (warm, cold, rebuild).
+  // Reads DC through the ref so a reconnect (new DC, same tab) is picked up.
+  const shipChunk = useCallback((e: MessageEvent<ArrayBuffer>) => {
+    if (mutedRef.current) return;  // OS paused the mic — don't ship zeros
+    const dc = dataChannelRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    const ev = silenceRef.current.push(peakAbsInt16(e.data));
+    dc.send(e.data);
+    if (ev) {
+      sendMicDiag(ev.kind, { gapSec: ev.seconds, peak: ev.peak });
+      if (ev.kind === "silent") useVoiceStore.getState().setMicError("Mic sending silence");
+    }
+  }, [sendMicDiag]);
 
   // iOS 17.4+ may GC the worklet while muted even with the gain(0) workaround.
   // On unmute we tear down source/worklet but keep audioCtx + gain + stream,
@@ -260,16 +306,10 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
       processorOptions: { inputSampleRate: inputSampleRateRef.current },
     });
     workletRef.current = worklet;
-    worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-      if (mutedRef.current) return;
-      const dc = dataChannelRef.current;
-      if (dc && dc.readyState === "open") {
-        dc.send(e.data);
-      }
-    };
+    worklet.port.onmessage = shipChunk;
     source.connect(worklet);
     worklet.connect(gain);
-  }, []);
+  }, [shipChunk]);
 
   const startListening = useCallback(
     async (mode: VoiceMode) => {
@@ -286,6 +326,8 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
       store.clearTranscript();
       store.setMicError(null);
       mutedRef.current = false;
+      silenceRef.current = new MicSilenceTracker();
+      listenStartRef.current = performance.now();
 
       // Tell host we're starting
       dataChannel.send(JSON.stringify({ type: "voice-start", mode }));
@@ -341,10 +383,17 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
             }));
           } catch { /* channel closed between check and send */ }
 
+          // Report AudioContext suspend/interrupt while listening (Android can
+          // suspend it under us when focus or audio routing changes).
+          audioCtx.onstatechange = () => {
+            if (useVoiceStore.getState().status === "listening") sendMicDiag(`ctx-${audioCtx.state}`);
+          };
+
           const audioTrack = stream.getAudioTracks()[0];
           if (audioTrack) {
             audioTrack.onended = () => {
               console.warn("[voice] Audio track ended — mic was revoked or taken by another app");
+              sendMicDiag("track-ended");
               if (dataChannel.readyState === "open") {
                 try { dataChannel.send(JSON.stringify({ type: "voice-stop", reason: "track-ended" })); }
                 catch { /* ignore */ }
@@ -354,11 +403,13 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
             };
             audioTrack.onmute = () => {
               console.warn("[voice] Audio track muted by OS/browser");
+              sendMicDiag("track-muted");
               mutedRef.current = true;
               useVoiceStore.getState().setMicError("Mic paused by OS");
             };
             audioTrack.onunmute = () => {
               console.info("[voice] Audio track unmuted");
+              sendMicDiag("track-unmuted");
               mutedRef.current = false;
               useVoiceStore.getState().setMicError(null);
               rebuildWorkletGraph();
@@ -380,16 +431,10 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
           });
           workletRef.current = worklet;
 
-          // Rebind every call: the closure captures dataChannelRef.current, so
+          // Rebind every call: shipChunk reads dataChannelRef.current, so
           // a reconnect (same PWA tab, new DC) doesn't leave tap #N shipping
           // audio over a dead channel.
-          worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-            if (mutedRef.current) return;
-            const dc = dataChannelRef.current;
-            if (dc && dc.readyState === "open") {
-              dc.send(e.data);
-            }
-          };
+          worklet.port.onmessage = shipChunk;
 
           source.connect(worklet);
           worklet.connect(gain);
@@ -441,10 +486,17 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         }
 
         // Monitor audio track lifecycle — detect mic death from OS/browser
+        // Report AudioContext suspend/interrupt while listening (Android can
+        // suspend it under us when focus or audio routing changes).
+        audioCtx.onstatechange = () => {
+          if (useVoiceStore.getState().status === "listening") sendMicDiag(`ctx-${audioCtx.state}`);
+        };
+
         const audioTrack = stream.getAudioTracks()[0];
         if (audioTrack) {
           audioTrack.onended = () => {
             console.warn("[voice] Audio track ended — mic was revoked or taken by another app");
+            sendMicDiag("track-ended");
             if (dataChannel.readyState === "open") {
               try { dataChannel.send(JSON.stringify({ type: "voice-stop", reason: "track-ended" })); }
               catch { /* ignore */ }
@@ -454,11 +506,13 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
           };
           audioTrack.onmute = () => {
             console.warn("[voice] Audio track muted by OS/browser");
+            sendMicDiag("track-muted");
             mutedRef.current = true;
             useVoiceStore.getState().setMicError("Mic paused by OS");
           };
           audioTrack.onunmute = () => {
             console.info("[voice] Audio track unmuted");
+            sendMicDiag("track-unmuted");
             mutedRef.current = false;
             useVoiceStore.getState().setMicError(null);
             rebuildWorkletGraph();
@@ -498,15 +552,9 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         });
         workletRef.current = worklet;
 
-        // Send PCM chunks to host as binary. Read DC through the ref so this
-        // closure survives a reconnect cycle.
-        worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-          if (mutedRef.current) return;  // OS paused the mic — don't ship zeros
-          const dc = dataChannelRef.current;
-          if (dc && dc.readyState === "open") {
-            dc.send(e.data);
-          }
-        };
+        // Send PCM chunks to host as binary. shipChunk reads DC through the
+        // ref so this survives a reconnect cycle.
+        worklet.port.onmessage = shipChunk;
 
         // Connect: source → worklet → silent gain → destination
         // The gain(0) prevents echo but keeps the audio graph alive
@@ -533,7 +581,7 @@ export function useVoice({ dataChannel }: UseVoiceOptions) {
         }
       }
     },
-    [dataChannel],
+    [dataChannel, shipChunk, sendMicDiag],
   );
 
   const stopListening = useCallback((reason?: string) => {

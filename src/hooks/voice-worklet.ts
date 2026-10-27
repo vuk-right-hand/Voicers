@@ -144,6 +144,71 @@ class PCMProcessor extends AudioWorkletProcessor {
 registerProcessor("pcm-processor", PCMProcessor);
 `;
 
+// ─── Mic silence detector (diagnostic only) ────────────────────────────────
+//
+// Field report 2026-10-27: on Android, STT randomly "stops listening" mid-
+// dictation or is dead on the next tap. Host logs showed the phone shipping
+// near-zero audio at those moments. This classifies each 100 ms Int16 chunk
+// so the PWA can report it (with a track/AudioContext snapshot) to the host
+// log. It never changes the audio path.
+//
+//   silent    — ≥2 s where every sample is within ±1 LSB: digital zero. A live
+//               mic never does this, even in a quiet room. Shown as a toast.
+//   quiet     — ≥5 s near-silent (peak ≤ 8 LSB): could be a dead mic or just
+//               a pause through noise suppression. Logged only.
+//   recovered — audio came back after a silent/quiet report.
+
+export const SILENT_PEAK = 1;
+export const QUIET_PEAK = 8;
+export const SILENT_CHUNKS = 20;
+export const QUIET_CHUNKS = 50;
+
+export function peakAbsInt16(buf: ArrayBuffer): number {
+  const s = new Int16Array(buf);
+  let peak = 0;
+  for (let i = 0; i < s.length; i++) {
+    const v = s[i] < 0 ? -s[i] : s[i];
+    if (v > peak) peak = v;
+  }
+  return peak;
+}
+
+export type MicSilenceEvent = {
+  kind: "silent" | "quiet" | "recovered";
+  seconds: number;
+  peak: number;
+};
+
+export class MicSilenceTracker {
+  run = 0;
+  runPeak = 0;
+  reported = false;
+
+  push(peak: number): MicSilenceEvent | null {
+    if (peak > QUIET_PEAK) {
+      const ev: MicSilenceEvent | null = this.reported
+        ? { kind: "recovered", seconds: this.run / 10, peak }
+        : null;
+      this.run = 0;
+      this.runPeak = 0;
+      this.reported = false;
+      return ev;
+    }
+    this.run++;
+    if (peak > this.runPeak) this.runPeak = peak;
+    if (this.reported) return null;
+    if (this.run >= SILENT_CHUNKS && this.runPeak <= SILENT_PEAK) {
+      this.reported = true;
+      return { kind: "silent", seconds: this.run / 10, peak: this.runPeak };
+    }
+    if (this.run >= QUIET_CHUNKS) {
+      this.reported = true;
+      return { kind: "quiet", seconds: this.run / 10, peak: this.runPeak };
+    }
+    return null;
+  }
+}
+
 // ─── Error reason → user-facing copy ───────────────────────────────────────
 
 export function friendlyMessageFor(reason: string | undefined): string {

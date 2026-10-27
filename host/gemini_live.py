@@ -51,6 +51,13 @@ _HAS_LATIN_OR_DIGIT = re.compile(r"[a-zA-Z0-9]")
 # streaming — proactive activityEnd→activityStart resets the pipeline.
 _FLUSH_INTERVAL_S = 15
 
+# ASR-stall diagnostic (2026-10-27): log when the phone is clearly sending
+# speech but Gemini returns no transcript, to separate "Gemini went deaf"
+# from "phone mic went silent" in field reports. Diagnostic only.
+_STALL_SPEECH_RMS = 0.02        # per-chunk RMS that counts as speech
+_STALL_AFTER_S = 6.0            # transcript gap before we call it a stall
+_STALL_MIN_SPEECH_CHUNKS = 30   # ≥3 s of speech inside that gap
+
 
 def _fetch_hosted_gemini_token() -> tuple[str, float]:
     """Fetch a Pro-tier ephemeral Gemini token from Vercel.
@@ -164,6 +171,10 @@ class GeminiLive:
         self._peak_qsize: int = 0
         # Rolling 5 s RMS window over the last N chunks (~50 at 100 ms).
         self._rms_window: list[float] = []
+        # ASR-stall diagnostic state (per turn).
+        self._last_transcript_ts: float = 0.0
+        self._speech_chunks_since_transcript = 0
+        self._stall_since: float | None = None
 
         # ── Session-lifecycle promotion (2026-04-17): per-turn tracking.
         # The session is now per-WebRTC-connection (opened on SDP offer,
@@ -338,6 +349,9 @@ class GeminiLive:
         self._peak_qsize = 0
         self._filter_rejections = 0
         self._start_ts = time.monotonic()
+        self._last_transcript_ts = self._start_ts
+        self._speech_chunks_since_transcript = 0
+        self._stall_since = None
 
         self._final_signal.clear()
 
@@ -523,10 +537,11 @@ class GeminiLive:
                         avg = sum(self._rms_window) / len(self._rms_window)
                         if avg < 0.0002:
                             logger.warning(
-                                "Low mic RMS (rolling 5s avg=%.6f) — mic may be "
+                                "VOICE-DIAG low-mic: Low mic RMS (rolling 5s avg=%.6f) — mic may be "
                                 "producing pure silence despite noiseSuppression",
                                 avg,
                             )
+                    self._check_asr_stall(time.monotonic(), rms)
                 except Exception as exc:
                     logger.warning("Gemini send error: %s", exc)
         except asyncio.CancelledError:
@@ -535,6 +550,34 @@ class GeminiLive:
             "Send loop ended — %d chunks sent total, peak_qsize=%d",
             chunks_sent, self._peak_qsize,
         )
+
+    def _check_asr_stall(self, now: float, rms: float) -> None:
+        """Log once per gap when speech-level audio gets no transcript back."""
+        if rms >= _STALL_SPEECH_RMS:
+            self._speech_chunks_since_transcript += 1
+        if self._stall_since is not None or self._turn_counter == 0:
+            return
+        gap = now - self._last_transcript_ts
+        if gap > _STALL_AFTER_S and self._speech_chunks_since_transcript >= _STALL_MIN_SPEECH_CHUNKS:
+            self._stall_since = self._last_transcript_ts
+            logger.warning(
+                "VOICE-DIAG asr-stall: no transcript for %.1fs despite %.1fs of "
+                "speech-level audio (since_last_flush=%.1fs turn_active=%s flushes=%d)",
+                gap, self._speech_chunks_since_transcript / 10,
+                now - self._last_activity_start, self._turn_active, self._flushes_total,
+            )
+
+    def _note_transcript(self) -> None:
+        """Any input_transcription (even filtered) proves ASR is alive."""
+        now = time.monotonic()
+        if self._stall_since is not None:
+            logger.warning(
+                "VOICE-DIAG asr-resumed: transcripts back after %.1fs gap",
+                now - self._stall_since,
+            )
+            self._stall_since = None
+        self._last_transcript_ts = now
+        self._speech_chunks_since_transcript = 0
 
     @staticmethod
     def _rms_of_pcm16le(pcm_bytes: bytes) -> float:
@@ -772,6 +815,7 @@ class GeminiLive:
                     if has_input:
                         raw = content.input_transcription.text
                         logger.info("  input_transcription: %r", raw[:100])
+                        self._note_transcript()
                         if raw.strip() and _HAS_LATIN_OR_DIGIT.search(raw):
                             self.interim_buffer = (self.interim_buffer + raw).strip()
                             self._transcriptions_total += 1

@@ -560,6 +560,16 @@ class WebRTCHost:
                     self._mic_info["userAgent"],
                 )
 
+            elif cmd_type == "mic-diag":
+                # Phone-side mic health report (silence detected, track muted/
+                # ended, AudioContext state change). Diagnostic only — logged
+                # with a grep-able prefix. Untrusted input: truncate.
+                logger.warning(
+                    "VOICE-DIAG phone %s: %s",
+                    str(data.get("event", "?"))[:40],
+                    json.dumps(data.get("state", {}))[:600],
+                )
+
             # ── Trackpad mode commands ──────────────────────────────
 
             elif cmd_type == "mousemove":
