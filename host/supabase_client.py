@@ -118,25 +118,40 @@ def upsert_session(
     raise RuntimeError("Could not connect to Supabase after %d retries" % max_retries)
 
 
-def _patch_session_with_retry(session_id: str, payload: dict, what: str) -> None:
+# Matches a session row that is NOT in the healthy idle state. Used by the
+# heartbeat so an already-healthy row gets zero writes (2026-10-27: unconditional
+# 30 s PATCHes from every idle host were draining the Supabase Disk IO budget).
+_STALE_ROW_FILTER = (
+    "(pc_status.neq.waiting,"
+    "signaling_data.is.null,"
+    "signaling_data->>type.neq.host-ready)"
+)
+
+
+def _patch_session_with_retry(
+    session_id: str, payload: dict, what: str, extra_params: dict | None = None,
+) -> list:
     """PATCH the session row, retrying transient network failures.
 
     These writes are load-bearing for reconnection: if the host-ready
     republish after a bye/close is lost to a single ReadTimeout, the row
     stays stale (pc_status=connected, signaling_data=answer) and the phone
     dashboard shows "Desktop host is offline" until the host restarts.
+
+    Returns the updated rows (empty if a filter in extra_params matched nothing).
     """
     last_exc: Exception | None = None
     for attempt in range(3):
         try:
             resp = httpx.patch(
-                f"{REST_URL}/sessions?id=eq.{session_id}",
+                f"{REST_URL}/sessions",
+                params={"id": f"eq.{session_id}", **(extra_params or {})},
                 headers=_headers,
                 json=payload,
                 timeout=10.0,
             )
             resp.raise_for_status()
-            return
+            return resp.json() if resp.content else []
         except (httpx.TimeoutException, httpx.TransportError, OSError) as exc:
             last_exc = exc
             logger.warning(
@@ -156,6 +171,24 @@ def update_pc_status(session_id: str, status: str) -> None:
     _patch_session_with_retry(session_id, {"pc_status": status}, "pc_status")
 
 
+def heal_session(session_id: str, signaling_data: dict, force: bool = False) -> bool:
+    """Reset the row to waiting + host-ready in ONE write, and only if stale.
+
+    With force=False the PATCH carries _STALE_ROW_FILTER, so a healthy row is
+    a no-op in Postgres (no new tuple, no WAL, no Realtime event). force=True
+    writes unconditionally — used when the host's ice_servers changed and the
+    row may carry outdated TURN credentials. Returns True if a row was written.
+    """
+    extra = None if force else {"or": _STALE_ROW_FILTER}
+    rows = _patch_session_with_retry(
+        session_id,
+        {"pc_status": "waiting", "signaling_data": signaling_data},
+        "heal",
+        extra,
+    )
+    return bool(rows)
+
+
 # ── Async wrappers ─────────────────────────────────────────────────────────────
 # httpx (sync) blocks the caller's thread. When called from an async def these
 # wrappers route the blocking HTTP call into a thread pool so the aiortc/uvicorn
@@ -168,6 +201,10 @@ async def write_signaling_async(session_id: str, data: dict) -> None:
 
 async def update_pc_status_async(session_id: str, status: str) -> None:
     await asyncio.to_thread(update_pc_status, session_id, status)
+
+
+async def heal_session_async(session_id: str, signaling_data: dict, force: bool = False) -> bool:
+    return await asyncio.to_thread(heal_session, session_id, signaling_data, force)
 
 
 async def upsert_session_async(

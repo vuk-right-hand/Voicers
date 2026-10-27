@@ -38,6 +38,7 @@ from supabase_client import (
     upsert_session_async,
     write_signaling_async,
     update_pc_status_async,
+    heal_session_async,
     subscribe_signaling,
     check_subscription_blocked_async,
     USER_ID,
@@ -252,6 +253,9 @@ class WebRTCHost:
         # host-ready heartbeat — self-heals stale session rows (missed
         # republish after bye/close, host killed mid-handshake).
         self._heartbeat_task: asyncio.Task | None = None
+        # (ice_servers, turn_status) the heartbeat last wrote to the row. When
+        # it differs from current, the next heartbeat writes unconditionally.
+        self._heartbeat_ice_key: str | None = None
 
     async def start(self):
         """Boot up: upsert session, subscribe to signaling, wait for offer."""
@@ -1242,6 +1246,11 @@ class WebRTCHost:
         Skipped while a handshake is in flight (_offer_lock held) or the PC is
         live ('new'/'connecting'/'connected') so we never clobber signaling
         mid-exchange.
+
+        The write is conditional (heal_session): a row that is already
+        waiting + host-ready is left untouched, so an idle host costs zero
+        database writes. It's forced only when ice_servers/turn_status changed
+        since the heartbeat last wrote them (boot, 12 h TURN refresh).
         """
         while self._running:
             try:
@@ -1253,14 +1262,17 @@ class WebRTCHost:
                 state = self.pc.connectionState if self.pc else None
                 if state in ("new", "connecting", "connected"):
                     continue
-                await update_pc_status_async(self.session_id, "waiting")
-                await write_signaling_async(self.session_id, {
+                ice_key = json.dumps([self._ice_servers_json, self._turn_status], sort_keys=True)
+                force = ice_key != self._heartbeat_ice_key
+                healed = await heal_session_async(self.session_id, {
                     "type": "host-ready",
                     "host_id": USER_ID,
                     "ice_servers": self._ice_servers_json,
                     "turn_status": self._turn_status,
-                })
-                logger.debug("host-ready heartbeat republished")
+                }, force=force)
+                self._heartbeat_ice_key = ice_key
+                if healed and not force:
+                    logger.info("host-ready heartbeat healed a stale session row")
             except asyncio.CancelledError:
                 return
             except Exception as exc:

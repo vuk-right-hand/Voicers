@@ -45,6 +45,7 @@ def _make_host() -> webrtc_host.WebRTCHost:
     host.pc = None
     host._running = True
     host._offer_lock = asyncio.Lock()
+    host._heartbeat_ice_key = None
     return host
 
 
@@ -62,6 +63,18 @@ def recorders(monkeypatch):
     monkeypatch.setattr(webrtc_host, "update_pc_status_async", fake_update_pc_status)
     monkeypatch.setattr(webrtc_host, "write_signaling_async", fake_write_signaling)
     return pc_status_calls, signaling_writes
+
+
+@pytest.fixture
+def heal_calls(monkeypatch):
+    calls: list[tuple[str, dict, bool]] = []
+
+    async def fake_heal(session_id, payload, force=False):
+        calls.append((session_id, payload, force))
+        return force
+
+    monkeypatch.setattr(webrtc_host, "heal_session_async", fake_heal)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -135,36 +148,86 @@ async def _run_heartbeat_briefly(host, monkeypatch, cycles: float = 6):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_republishes_while_idle(recorders, monkeypatch):
-    pc_status_calls, signaling_writes = recorders
+async def test_heartbeat_republishes_while_idle(recorders, heal_calls, monkeypatch):
     host = _make_host()
     host.pc = None  # idle — no phone
 
     await _run_heartbeat_briefly(host, monkeypatch)
 
-    assert any(s == "waiting" for _, s in pc_status_calls), (
-        "idle heartbeat must reset pc_status to waiting"
-    )
-    assert any(w[1]["type"] == "host-ready" for w in signaling_writes)
+    assert heal_calls, "idle heartbeat must attempt to heal the row"
+    assert all(p["type"] == "host-ready" for _, p, _ in heal_calls)
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_silent_while_connected(recorders, monkeypatch):
-    pc_status_calls, signaling_writes = recorders
+async def test_heartbeat_is_conditional_after_first_write(recorders, heal_calls, monkeypatch):
+    """Disk IO fix (2026-10-27): only the first beat (and beats after an ICE
+    change) may write unconditionally; the rest must be stale-only heals."""
     host = _make_host()
-    host.pc = type("PC", (), {"connectionState": "connected"})()
+    host.pc = None
 
     await _run_heartbeat_briefly(host, monkeypatch)
 
+    assert len(heal_calls) >= 2
+    assert heal_calls[0][2] is True
+    assert all(force is False for _, _, force in heal_calls[1:])
+    # The old unconditional two-PATCH path must be gone from the heartbeat.
+    pc_status_calls, signaling_writes = recorders
     assert pc_status_calls == []
     assert signaling_writes == []
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_silent_during_handshake(recorders, monkeypatch):
+async def test_heartbeat_forces_write_when_ice_servers_change(recorders, heal_calls, monkeypatch):
+    """A TURN refresh changes ice_servers; the row must get the new
+    credentials even though it is otherwise healthy (waiting + host-ready)."""
+    host = _make_host()
+    host.pc = None
+    host._heartbeat_ice_key = webrtc_host.json.dumps([None, "none"], sort_keys=True)
+    host._ice_servers_json = [{"urls": "turn:new"}]
+    host._turn_status = "active"
+
+    await _run_heartbeat_briefly(host, monkeypatch)
+
+    assert heal_calls[0][2] is True
+    assert heal_calls[0][1]["ice_servers"] == [{"urls": "turn:new"}]
+    assert all(force is False for _, _, force in heal_calls[1:])
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_retries_forced_write_after_failure(recorders, monkeypatch):
+    """If the forced write fails, the next beat must force again — not drop
+    to a conditional heal that would leave stale TURN creds on a healthy row."""
+    calls: list[bool] = []
+
+    async def flaky_heal(session_id, payload, force=False):
+        calls.append(force)
+        if len(calls) == 1:
+            raise TimeoutError("down")
+        return False
+
+    monkeypatch.setattr(webrtc_host, "heal_session_async", flaky_heal)
+    host = _make_host()
+    host.pc = None
+
+    await _run_heartbeat_briefly(host, monkeypatch)
+
+    assert calls[:2] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_silent_while_connected(recorders, heal_calls, monkeypatch):
+    host = _make_host()
+    host.pc = type("PC", (), {"connectionState": "connected"})()
+
+    await _run_heartbeat_briefly(host, monkeypatch)
+
+    assert heal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_silent_during_handshake(recorders, heal_calls, monkeypatch):
     """While _offer_lock is held (offer being answered), the heartbeat must
     not clobber signaling_data mid-exchange."""
-    pc_status_calls, signaling_writes = recorders
     host = _make_host()
     host.pc = None
 
@@ -174,5 +237,4 @@ async def test_heartbeat_silent_during_handshake(recorders, monkeypatch):
     finally:
         host._offer_lock.release()
 
-    assert pc_status_calls == []
-    assert signaling_writes == []
+    assert heal_calls == []

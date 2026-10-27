@@ -66,3 +66,5 @@ host/.venv/
 next-env.d.ts
 
 certificates
+# Supabase CLI link state
+supabase/.temp/
